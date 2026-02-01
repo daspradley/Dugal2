@@ -9,6 +9,13 @@ from typing import Dict, Callable, Any, List, Optional, Pattern, Tuple, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 
+try:
+    from ai_command_interpreter import AICommandInterpreter, CommandInterpretation
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+    logger.debug("AI command interpreter not available - using regex only")
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -51,8 +58,27 @@ class CommandRouter:
         self.command_history = []
         self.recent_matches = []
         self.max_history = 100
+        self.ai_interpreter = None
+        self.use_ai = False
         
-        logger.debug("Command router initialized")
+        if AI_AVAILABLE:
+            try:
+                from component_manager import component_manager
+                self.ai_interpreter = component_manager.get_ai_interpreter()
+                self.use_ai = self.ai_interpreter is not None
+                
+                if self.use_ai:
+                    logger.info("AI command interpreter enabled in router")
+                else:
+                    logger.info("AI interpreter not available (no API key) - using regex only")
+            except ImportError:
+                logger.debug("Component manager not available - using regex only")
+            except Exception as e:
+                logger.warning(f"Error initializing AI interpreter: {e} - using regex only")
+            
+    logger.debug("Command router initialized")
+        
+        
     
     def register_handler(self, command_pattern: str, handler_func: Callable,
                         preprocessor: Optional[Callable] = None) -> None:
@@ -117,7 +143,7 @@ class CommandRouter:
         self.preprocessors.append(preprocessor_func)
         logger.debug("Registered command preprocessor")
     
-    def route_command(self, command_text: str) -> RouterResult:
+    def route_command(self, command_text: str, context: Optional[Dict] = None) -> RouterResult:
         """
         Route a command to the appropriate handler.
         
@@ -133,6 +159,33 @@ class CommandRouter:
                 error="Empty command text"
             )
             
+        if self.use_ai and self.ai_interpreter:
+            try:
+                logger.debug(f"Attempting AI interpretation for: '{command_text}'")
+                interpretation = self.ai_interpreter.interpret_command(
+                    command_text, 
+                    context
+                )
+                
+                # If AI is confident, use its interpretation
+                if interpretation.confidence >= 0.7:
+                    logger.info(f"Using AI interpretation: {interpretation.intent} (confidence: {interpretation.confidence:.2f})")
+                    return self._route_from_ai(interpretation, command_text)
+                
+                # If AI suggests clarification, return that
+                elif interpretation.suggested_clarification:
+                    logger.info("AI needs clarification")
+                    return RouterResult(
+                        success=False,
+                        error=interpretation.suggested_clarification,
+                        metadata={'needs_clarification': True, 'ai_confidence': interpretation.confidence}
+                    )
+                else:
+                    logger.debug(f"AI confidence too low ({interpretation.confidence:.2f}), falling back to regex")
+                    
+            except Exception as e:
+                logger.error(f"AI interpretation failed: {e}, falling back to regex")
+
         original_command = command_text
         command_text = command_text.strip()
         
@@ -384,6 +437,213 @@ class CommandRouter:
             alternative_matches=alternative_matches
         )
     
+    def _route_from_ai(
+        self, 
+        interpretation: 'CommandInterpretation',
+        original_text: str
+    ) -> RouterResult:
+        """
+        Route command based on AI interpretation.
+        
+        Args:
+            interpretation: AI interpretation result
+            original_text: Original command text
+            
+        Returns:
+            RouterResult with routed command
+        """
+        intent = interpretation.intent
+        entities = interpretation.entities
+        
+        logger.debug(f"Routing AI interpretation: intent={intent}, entities={entities}")
+        
+        # Handle unclear intent
+        if intent == "unclear":
+            return RouterResult(
+                success=False,
+                error=interpretation.suggested_clarification or "Command not understood",
+                metadata={'ai_interpretation': True, 'needs_clarification': True}
+            )
+        
+        # Map intents to handlers
+        if intent == "search":
+            return self._handle_ai_search(interpretation, original_text)
+        
+        elif intent == "inventory_update":
+            return self._handle_ai_inventory_update(interpretation, original_text)
+        
+        elif intent == "navigate_sheet":
+            return self._handle_ai_navigate_sheet(interpretation, original_text)
+        
+        elif intent == "set_search_column":
+            return self._handle_ai_set_column(interpretation, original_text, 'search')
+        
+        elif intent == "set_input_column":
+            return self._handle_ai_set_column(interpretation, original_text, 'input')
+        
+        elif intent == "mode_change":
+            return self._handle_ai_mode_change(interpretation, original_text)
+        
+        elif intent == "system_command":
+            return self._handle_ai_system_command(interpretation, original_text)
+        
+        else:
+            # Unknown intent - fall back to regex
+            logger.warning(f"Unknown AI intent: {intent}, falling back to regex")
+            return RouterResult(
+                success=False,
+                error=f"AI identified intent '{intent}' but no handler available",
+                metadata={'ai_interpretation': True, 'fallback_to_regex': True}
+            )
+    
+    def _handle_ai_search(self, interpretation: 'CommandInterpretation', original_text: str) -> RouterResult:
+        """Handle search intent from AI."""
+        item_name = interpretation.entities.get('item_name', original_text)
+        
+        # Try to find a registered search handler
+        for pattern_str, handler in self.handlers.items():
+            if 'search' in pattern_str.lower() or 'find' in pattern_str.lower():
+                match = CommandMatch(
+                    handler=handler,
+                    command_text=item_name,
+                    pattern="ai_search",
+                    groups=(item_name,),
+                    confidence=interpretation.confidence,
+                    metadata={'ai_interpreted': True, 'intent': 'search'}
+                )
+                return RouterResult(success=True, command_match=match)
+        
+        # No search handler found
+        logger.warning("No search handler registered")
+        return RouterResult(
+            success=False,
+            error="Search handler not available",
+            metadata={'ai_interpretation': True}
+        )
+    
+    def _handle_ai_inventory_update(self, interpretation: 'CommandInterpretation', original_text: str) -> RouterResult:
+        """Handle inventory update intent from AI."""
+        if hasattr(self, 'inventory_handler') and self.inventory_handler:
+            match = CommandMatch(
+                handler=self.inventory_handler,
+                command_text=interpretation.entities.get('item_name', original_text),
+                pattern="ai_inventory_update",
+                named_groups={
+                    'item_name': interpretation.entities.get('item_name', ''),
+                    'quantity': interpretation.entities.get('quantity', 0),
+                    'operation': interpretation.entities.get('operation', 'set')
+                },
+                confidence=interpretation.confidence,
+                metadata={
+                    'ai_interpreted': True,
+                    'intent': 'inventory_update',
+                    'operation': interpretation.entities.get('operation')
+                }
+            )
+            return RouterResult(success=True, command_match=match)
+        
+        logger.warning("No inventory handler registered")
+        return RouterResult(
+            success=False,
+            error="Inventory handler not available",
+            metadata={'ai_interpretation': True}
+        )
+    
+    def _handle_ai_navigate_sheet(self, interpretation: 'CommandInterpretation', original_text: str) -> RouterResult:
+        """Handle sheet navigation intent from AI."""
+        sheet_name = interpretation.entities.get('sheet_name', '')
+        
+        # Find sheet navigation handler
+        for pattern_str, handler in self.handlers.items():
+            if 'sheet' in pattern_str.lower() or 'work with' in pattern_str.lower():
+                match = CommandMatch(
+                    handler=handler,
+                    command_text=sheet_name,
+                    pattern="ai_navigate_sheet",
+                    groups=(sheet_name,),
+                    confidence=interpretation.confidence,
+                    metadata={'ai_interpreted': True, 'intent': 'navigate_sheet'}
+                )
+                return RouterResult(success=True, command_match=match)
+        
+        logger.warning("No sheet navigation handler registered")
+        return RouterResult(
+            success=False,
+            error="Sheet navigation handler not available",
+            metadata={'ai_interpretation': True}
+        )
+    
+    def _handle_ai_set_column(self, interpretation: 'CommandInterpretation', original_text: str, column_type: str) -> RouterResult:
+        """Handle column setting intent from AI."""
+        column_name = interpretation.entities.get('column_name', '')
+        
+        # Find column setting handler
+        for pattern_str, handler in self.handlers.items():
+            if 'column' in pattern_str.lower() or 'target' in pattern_str.lower():
+                match = CommandMatch(
+                    handler=handler,
+                    command_text=column_name,
+                    pattern=f"ai_set_{column_type}_column",
+                    groups=(column_name,),
+                    confidence=interpretation.confidence,
+                    metadata={'ai_interpreted': True, 'intent': f'set_{column_type}_column'}
+                )
+                return RouterResult(success=True, command_match=match)
+        
+        logger.warning(f"No {column_type} column handler registered")
+        return RouterResult(
+            success=False,
+            error=f"Column setting handler not available",
+            metadata={'ai_interpretation': True}
+        )
+    
+    def _handle_ai_mode_change(self, interpretation: 'CommandInterpretation', original_text: str) -> RouterResult:
+        """Handle mode change intent from AI."""
+        mode = interpretation.entities.get('mode', '')
+        
+        # Find mode change handler
+        for pattern_str, handler in self.handlers.items():
+            if 'mode' in pattern_str.lower() or 'wild' in pattern_str.lower() or 'mild' in pattern_str.lower():
+                match = CommandMatch(
+                    handler=handler,
+                    command_text=mode,
+                    pattern="ai_mode_change",
+                    groups=(mode,),
+                    confidence=interpretation.confidence,
+                    metadata={'ai_interpreted': True, 'intent': 'mode_change'}
+                )
+                return RouterResult(success=True, command_match=match)
+        
+        logger.warning("No mode change handler registered")
+        return RouterResult(
+            success=False,
+            error="Mode change handler not available",
+            metadata={'ai_interpretation': True}
+        )
+    
+    def _handle_ai_system_command(self, interpretation: 'CommandInterpretation', original_text: str) -> RouterResult:
+        """Handle system command intent from AI."""
+        command_type = interpretation.entities.get('command_type', original_text)
+        
+        # Find system command handler
+        for pattern_str, handler in self.handlers.items():
+            if command_type.lower() in pattern_str.lower():
+                match = CommandMatch(
+                    handler=handler,
+                    command_text=command_type,
+                    pattern="ai_system_command",
+                    groups=(command_type,),
+                    confidence=interpretation.confidence,
+                    metadata={'ai_interpreted': True, 'intent': 'system_command'}
+                )
+                return RouterResult(success=True, command_match=match)
+        
+        logger.warning(f"No handler for system command: {command_type}")
+        return RouterResult(
+            success=False,
+            error=f"System command '{command_type}' handler not available",
+            metadata={'ai_interpretation': True}
+
     def _calculate_match_confidence(self, pattern: str, command: str) -> float:
         """
         Calculate confidence score for a partial match.

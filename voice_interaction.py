@@ -2076,6 +2076,63 @@ class VoiceInteraction(QObject):
                 'message': f"Error processing command: {str(e)}"
             }
 
+    # ========== AI CONTEXT BUILDING METHOD ==========
+    def _build_ai_context(self) -> Dict[str, Any]:
+        """
+        Build context dictionary for AI command interpretation.
+        
+        Returns:
+            Dictionary with current system state for AI
+        """
+        context = {}
+        
+        try:
+            # Get Excel handler from dugal
+            if self.state.dugal and hasattr(self.state.dugal, 'excel_handler'):
+                handler = self.state.dugal.excel_handler
+                
+                # Sheet information
+                if hasattr(handler, 'workbook') and handler.workbook:
+                    try:
+                        context['sheets'] = list(handler.workbook.sheetnames)
+                    except Exception:
+                        pass
+                
+                # Current state
+                if hasattr(handler, 'active_sheet'):
+                    context['active_sheet'] = handler.active_sheet
+                
+                if hasattr(handler, 'selected_sheets'):
+                    context['selected_sheets'] = handler.selected_sheets
+                
+                if hasattr(handler, 'search_column'):
+                    context['search_column'] = handler.search_column
+                
+                if hasattr(handler, 'input_column'):
+                    context['input_column'] = handler.input_column
+                
+                # Get column names from first sheet
+                if handler.workbook and handler.workbook.sheetnames:
+                    try:
+                        first_sheet = handler.workbook[handler.workbook.sheetnames[0]]
+                        if first_sheet.max_row > 0:
+                            context['columns'] = [
+                                cell.value for cell in first_sheet[1] 
+                                if cell.value
+                            ]
+                    except Exception as e:
+                        logger.debug(f"Could not extract columns: {e}")
+            
+            # Last item context (for "it", "that", etc.)
+            if hasattr(self.state, 'active_item_context') and self.state.active_item_context:
+                context['last_item'] = self.state.active_item_context
+            
+        except Exception as e:
+            logger.error(f"Error building AI context: {e}")
+        
+        return context
+    # ========== END AI CONTEXT BUILDING ==========
+
     def process_command(self, command: str) -> Dict[str, Any]:
         """
         Process a voice command using the command router.
@@ -2088,8 +2145,13 @@ class VoiceInteraction(QObject):
             # Log the attempt with Dugal's flair
             self._log_command_attempt(command)
             
+            # ========== BUILD CONTEXT AND ROUTE COMMAND ==========
+            # Build context for AI interpretation
+            context = self._build_ai_context()
+            
             # Use the command router to match and execute the command
-            result = self.command_router.route_command(command)
+            result = self.command_router.route_command(command, context=context)
+            # ========== END CONTEXT ROUTING ==========
             
             if result.success:
                 try:

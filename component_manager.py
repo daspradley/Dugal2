@@ -117,6 +117,15 @@ class ComponentManager:
         """
         return self.get_component('search_engine')
     
+    def get_ai_interpreter(self):
+        """
+        Standardized method to get the AI command interpreter instance.
+        
+        Returns:
+            The AI interpreter instance or None if not available
+        """
+        return self.get_component('ai_interpreter')
+    
     def recover_component(self, component_name: str) -> bool:
         """
         Attempt to recover a component using its registered recovery handler.
@@ -208,6 +217,61 @@ class ComponentManager:
                     return False
                     
             self.register_recovery_handler('search_engine', recover_search_engine)
+            
+            # ========== AI INTERPRETER FACTORY ==========
+            # Register AI interpreter factory
+            def create_ai_interpreter():
+                try:
+                    from ai_command_interpreter import AICommandInterpreter
+                    
+                    # Get logging manager from registry
+                    logging_manager = GlobalRegistry.get('logging_manager')
+                    
+                    self.logger.debug("Creating AI command interpreter via factory")
+                    return AICommandInterpreter(
+                        logging_manager=logging_manager,
+                        enable_caching=True,
+                        confidence_threshold=0.7
+                    )
+                except ValueError as e:
+                    # No API key - that's okay, will fallback to regex
+                    self.logger.warning(f"AI interpreter unavailable (no API key): {e}")
+                    return None
+                except ImportError:
+                    self.logger.warning("AI interpreter module not found")
+                    return None
+                except Exception as e:
+                    self.logger.error(f"Error creating AI interpreter: {e}")
+                    return None
+                    
+            self.register_component_factory('ai_interpreter', create_ai_interpreter)
+            
+            # Register AI interpreter recovery handler
+            def recover_ai_interpreter():
+                try:
+                    # Try to get existing instance first
+                    ai_interpreter = GlobalRegistry.get('ai_interpreter')
+                    
+                    # If no instance exists, create a new one
+                    if not ai_interpreter:
+                        ai_interpreter = create_ai_interpreter()
+                        if ai_interpreter:
+                            GlobalRegistry.register('ai_interpreter', ai_interpreter)
+                            self.logger.info("Created new AI interpreter during recovery")
+                            return True
+                        else:
+                            self.logger.info("AI interpreter not available (likely no API key)")
+                            return False
+                    
+                    self.logger.info("AI interpreter already exists")
+                    return True
+                    
+                except Exception as e:
+                    self.logger.error(f"Error recovering AI interpreter: {e}")
+                    return False
+                    
+            self.register_recovery_handler('ai_interpreter', recover_ai_interpreter)
+            # ========== END AI INTERPRETER FACTORY ==========
             
         except Exception as e:
             self.logger.error(f"Error registering default factories: {e}")
