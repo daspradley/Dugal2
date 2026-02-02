@@ -57,7 +57,7 @@ class AICommandInterpreter:
             enable_caching: Whether to cache common command interpretations
             confidence_threshold: Minimum confidence for AI interpretation (0.0-1.0)
         """
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self.api_key = api_key or os.environ.get(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)
         if not self.api_key:
             logger.warning("No Anthropic API key found. AI interpretation will be unavailable.")
             raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY environment variable.")
