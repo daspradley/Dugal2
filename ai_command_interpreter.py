@@ -57,7 +57,7 @@ class AICommandInterpreter:
             enable_caching: Whether to cache common command interpretations
             confidence_threshold: Minimum confidence for AI interpretation (0.0-1.0)
         """
-        self.api_key = api_key or os.environ.get(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)
+        self.api_key = api_key or os.environ.get('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') or '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'
         if not self.api_key:
             logger.warning("No Anthropic API key found. AI interpretation will be unavailable.")
             raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY environment variable.")
@@ -303,17 +303,66 @@ INTERPRETATION GUIDELINES:
    - Spelled numbers: "three" → 3, "twenty-five" → 25
    - Handle both: "3" and "three" identically
    - Decimals: "two point five" → 2.5
+   
+   CRITICAL: NUMBERS IN PRODUCT NAMES VS INVENTORY COUNTS
+   
+   Numbers 1-25 are AMBIGUOUS - could be age statements OR small inventory counts:
+   - "knob creek 12" → AMBIGUOUS (12 Year vs 12 bottles)
+   - "glenlivet 18" → AMBIGUOUS (18 Year vs 18 bottles)
+   - "buffalo trace 15" → AMBIGUOUS (15 bottles is realistic)
+   
+   When ambiguous (number 1-25 with NO explicit operation word):
+   - Mark as "unclear" intent
+   - Confidence: 0.3-0.5
+   - Suggested clarification: "Did you mean to search for '[Item] [Number]' or update [Item] quantity by [Number]?"
+   
+   Numbers 26-99 are MORE LIKELY inventory counts but STILL CHECK:
+   - "makers mark 46" → LIKELY UPDATE (46 bottles reasonable)
+   - "woodford reserve 90" → LIKELY UPDATE (90 bottles reasonable)
+   - BUT "old forester 86" could be "Old Forester 86 Proof"
+   
+   Numbers 100+ are ALMOST ALWAYS inventory counts:
+   - "titos 150" → UPDATE (150 bottles)
+   - "well vodka 200" → UPDATE (200 bottles)
+   
+   Numbers 1000+ are PRODUCT NAMES (years, proof marks):
+   - "glenlivet 1824" → SEARCH (product name)
+   - "old grand dad 114" → SEARCH (114 proof)
+   
+   EXPLICIT operation words (add, subtract, set, plus, minus) = ALWAYS UPDATE:
+   - "knob creek 12 add" → UPDATE (regardless of number)
+   - "add 12 to knob creek" → UPDATE
+   - "glenlivet 18 plus" → UPDATE
 
 3. ITEM NAME MATCHING:
    - Accept partial names: "Tito's" is sufficient for "Tito's Vodka"
    - Brand names alone are valid: "Hendricks" for "Hendricks Gin"
    - Be flexible with spelling variations
+   - Numbers at END of item name suggest product variant: "Knob Creek 12", "Glenlivet 18"
+   - PRESERVE numbers as part of item name when ambiguous
 
-4. IMPLICIT OPERATIONS:
-   - Bare item + number often means update: "Makers Mark 3" → update with quantity 3
-   - BUT: If it could be a product code (like "Makers Mark 12-year"), mark ambiguous
-   - Use context to disambiguate when possible
-
+4. IMPLICIT OPERATIONS DECISION TREE:
+   
+   Pattern: "[Item Name] [Number]"
+   
+   Step 1: Check for explicit operation word
+   - If "add", "subtract", "plus", "minus", "set" present → ALWAYS inventory_update
+   
+   Step 2: Check number range
+   - If number ≥ 1000 → SEARCH (likely product name/year)
+   - If number 100-999 → LIKELY UPDATE (mark confidence 0.7, could clarify)
+   - If number 26-99 → AMBIGUOUS (confidence 0.4, ASK FOR CLARIFICATION)
+   - If number 1-25 → VERY AMBIGUOUS (confidence 0.3, ASK FOR CLARIFICATION)
+   
+   Step 3: Check decimal numbers
+   - Decimals (0.1 - 9.9) → LIKELY UPDATE (fractional bottles common)
+   
+   Examples:
+   - "makers mark 3" → unclear (confidence 0.3)
+   - "makers mark 0.6" → inventory_update (confidence 0.8, decimals = bottles)
+   - "makers mark 150" → inventory_update (confidence 0.9)
+   - "glenlivet 1824" → search (confidence 0.95, year = product name)
+   - "knob creek add 12" → inventory_update (confidence 1.0, explicit operation)
 5. CONFIDENCE SCORING:
    - 0.9-1.0: Crystal clear, unambiguous
    - 0.7-0.9: Clear but minor ambiguity
