@@ -9,6 +9,8 @@ from typing import Dict, Callable, Any, List, Optional, Pattern, Tuple, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 try:
     from ai_command_interpreter import AICommandInterpreter, CommandInterpretation
     AI_AVAILABLE = True
@@ -16,8 +18,6 @@ except ImportError:
     AI_AVAILABLE = False
     logger.debug("AI command interpreter not available - using regex only")
 
-# Configure logging
-logger = logging.getLogger(__name__)
 
 @dataclass
 class CommandMatch:
@@ -643,6 +643,7 @@ class CommandRouter:
             success=False,
             error=f"System command '{command_type}' handler not available",
             metadata={'ai_interpretation': True}
+        )
 
     def _calculate_match_confidence(self, pattern: str, command: str) -> float:
         """

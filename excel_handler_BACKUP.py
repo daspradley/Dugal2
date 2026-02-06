@@ -896,45 +896,24 @@ class ExcelHandler(QWidget):
         self.search_engine.workbook = wb
         logger.debug(f"Assigned workbook to search engine: {bool(wb)}")
         
-        # Pass selected sheets and header name to search engine
-        if hasattr(self.state, 'selected_sheets') and self.state.selected_sheets:
-            self.search_engine.selected_sheets = self.state.selected_sheets
-            logger.debug(f"Passed {len(self.state.selected_sheets)} selected sheets to search engine")
-        
-        # Pass input column name to search engine
-        if hasattr(self.state, 'input_column') and self.state.input_column:
-            self.search_engine.input_column_name = self.state.input_column
-            logger.debug(f"Passed input column name '{self.state.input_column}' to search engine")
-        
-        # Build input column map for all selected sheets
-        input_col_name = self.state.input_column
-        if hasattr(self.state, 'selected_sheets') and self.state.selected_sheets:
-            # Use the new per-sheet column mapping
-            self.search_engine.input_column_map = self.search_engine._find_inventory_column(
-                wb,
-                self.state.selected_sheets,
-                input_col_name
-            )
-            logger.debug(f"Built input column map for {len(self.search_engine.input_column_map)} sheets")
-        else:
-            # Fallback: single sheet mode - find in first sheet
-            input_column_found = False
-            if self.state.input_column:
-                # Find the column index for the input column
-                for sheet_name in self.state.selected_sheets if hasattr(self.state, 'selected_sheets') else wb.sheetnames:
-                    sheet = wb[sheet_name]
-                    for idx, cell in enumerate(sheet[1], start=1):
-                        if cell.value and str(cell.value).strip() == self.state.input_column:
-                            self.search_engine.input_column_index = idx
-                            self.search_engine.input_column_name = self.state.input_column
-                            logger.debug(f"Found input column '{self.state.input_column}' at index {idx}")
-                            input_column_found = True
-                            break
-                    if input_column_found:
+        # Set the input column index for value lookup
+        input_column_found = False
+        if self.state.input_column:
+            # Find the column index for the input column
+            for sheet_name in self.state.selected_sheets:
+                sheet = wb[sheet_name]
+                for idx, cell in enumerate(sheet[1], start=1):
+                    if cell.value and str(cell.value).strip() == self.state.input_column:
+                        self.search_engine.input_column_index = idx
+                        self.search_engine.input_column_name = self.state.input_column
+                        logger.debug(f"Found input column '{self.state.input_column}' at index {idx}")
+                        input_column_found = True
                         break
-                        
-            if not input_column_found:
-                logger.warning(f"Could not find input column '{self.state.input_column}' in header row")
+                if input_column_found:
+                    break
+                    
+        if not input_column_found:
+            logger.warning(f"Could not find input column '{self.state.input_column}' in header row")
             
         # Log the state before building index
         logger.debug(f"Search engine ready with: workbook={bool(wb)}, input_column_index={getattr(self.search_engine, 'input_column_index', None)}")

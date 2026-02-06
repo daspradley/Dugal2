@@ -36,7 +36,6 @@ class AdaptiveInventorySearchEngine:
         self.pending_patterns = defaultdict(int)
         self.confidence_threshold = 3
         self.base_patterns = self._load_base_patterns()
-        self.input_column_map = {} #maps sheet_name -> column_index for multi-sheet support
         
         if self.logging_manager:
             self.logging_manager.log_pattern_match({
@@ -418,24 +417,15 @@ class AdaptiveInventorySearchEngine:
         self.workbook = workbook  # Store reference to workbook
         column_idx = column_index_from_string(search_column)
         
-        # Find input column index by looking for header in selected sheets
-        if not hasattr(self, 'input_column_map') or not self.input_column_map:
-            # Get header name from input_column_name if available
-            header_name = getattr(self, 'input_column_name', "Ending Inventory: FARMbar")
-            
-            # Get selected sheets if available
-            selected_sheets = getattr(self, 'selected_sheets', None)
-            
-            # Build column map for each sheet
-            self.input_column_map = self._find_inventory_column(workbook, selected_sheets, header_name)
-            
-            if self.input_column_map:
-                logger.debug(f"Built input column map for {len(self.input_column_map)} sheets")
+        # Find input column index by looking for "Ending Inventory: FARMbar" in row 1
+        if not hasattr(self, 'input_column_index') or not self.input_column_index:
+            self.input_column_index = self._find_inventory_column(workbook)
+            if self.input_column_index:
+                logger.debug(f"Found input column 'Ending Inventory: FARMbar' at index {self.input_column_index}")
             else:
-                logger.warning(f"Could not find '{header_name}' column in any sheets")
-                # Keep input_column_index as fallback for single-sheet compatibility
-                if not hasattr(self, 'input_column_index'):
-                    self.input_column_index = 6
+                # Only use default if we couldn't find the column
+                self.input_column_index = 6  # Default fallback
+                logger.warning(f"Could not find 'Ending Inventory: FARMbar' column, using default column {self.input_column_index}")
         
         for sheet in workbook.sheetnames:
             ws = workbook[sheet]
@@ -451,46 +441,29 @@ class AdaptiveInventorySearchEngine:
         except Exception as e:
             logger.error(f"Error registering search engine: {e}")
 
-    def _find_inventory_column(self, workbook, selected_sheets=None, header_name=None) -> dict:
-        """
-        Find the column index for a header in each selected sheet.
-        Returns a dictionary mapping sheet_name -> column_index.
-        """
+    def _find_inventory_column(self, workbook) -> int:
+        """Find the column index for 'Ending Inventory: FARMbar'."""
         try:
-            column_map = {}
+            # Try to find the column in the first sheet's header row
+            first_sheet = workbook[workbook.sheetnames[0]]
+            for cell in first_sheet[1]:  # Row 1 (header row)
+                if cell.value and "Ending Inventory: FARMbar" in str(cell.value):
+                    self.input_column_name = str(cell.value)
+                    return cell.column
             
-            # If no header name provided, use default
-            if not header_name:
-                header_name = "Ending Inventory: FARMbar"
-            
-            # If no sheets specified, search all sheets
-            if not selected_sheets:
-                selected_sheets = workbook.sheetnames
-            
-            # Find the column in each selected sheet
-            for sheet_name in selected_sheets:
-                try:
-                    sheet = workbook[sheet_name]
-                    for cell in sheet[1]:  # Row 1 (header row)
-                        if cell.value and header_name in str(cell.value):
-                            column_map[sheet_name] = cell.column
-                            self.input_column_name = str(cell.value)
-                            logger.debug(f"Found '{header_name}' in sheet '{sheet_name}' at column {cell.column}")
-                            break
-                except Exception as e:
-                    logger.warning(f"Error finding column in sheet '{sheet_name}': {e}")
-                    continue
-            
-            if not column_map:
-                logger.warning(f"Could not find '{header_name}' column in any selected sheets")
-            else:
-                logger.info(f"Mapped input column across {len(column_map)} sheets")
-            
-            return column_map
+            # If not found in first sheet, try others
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                for cell in sheet[1]:
+                    if cell.value and "Ending Inventory: FARMbar" in str(cell.value):
+                        self.input_column_name = str(cell.value)
+                        return cell.column
                         
+            # If still not found, return None
+            return None
         except Exception as e:
             logger.error(f"Error finding inventory column: {e}")
-            return {}
+            return None
 
     def _index_sheet(self, sheet, sheet_name: str, column_idx: int) -> None:
         """Index a single sheet."""
@@ -779,7 +752,7 @@ class AdaptiveInventorySearchEngine:
             
             # Determine the value column (this depends on your structure)
             # Typically this would be determined by your input_column setting
-            value_col = self._get_value_column(sheet_name=sheet_name)
+            value_col = self._get_value_column()
             
             if not value_col:
                 return 'unknown'
@@ -797,22 +770,12 @@ class AdaptiveInventorySearchEngine:
             logger.error(f"Error getting value for item: {e}")
             return 'unknown'
         
-    def _get_value_column(self, sheet_name=None):
-        """
-        Get the column index for the value column.
-        If sheet_name is provided, returns the column for that specific sheet.
-        Otherwise falls back to input_column_index for backward compatibility.
-        """
-        # Try to get sheet-specific column from map
-        if sheet_name and hasattr(self, 'input_column_map') and self.input_column_map:
-            column = self.input_column_map.get(sheet_name)
-            if column:
-                return column
-        
-        # Fall back to single column index for backward compatibility
+    def _get_value_column(self):
+        """Get the column index for the value column."""
+        # This should be based on your application's configuration
+        # For example, getting it from the excel_handler or a config setting
         if hasattr(self, 'input_column_index'):
             return self.input_column_index
-        
         return None
 
     def _get_current_value(self, item_data: Dict[str, Any]) -> float:

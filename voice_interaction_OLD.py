@@ -1056,7 +1056,7 @@ class VoiceInteraction(QObject):
 
     def _handle_search(self, match):
         """Handle search commands with standardized component access."""
-        search_term = match.groups[0]  # Fixed: AI routing uses groups[0]
+        search_term = match.groups[0]  # Fixed: AI creates tuple with 1 element at index 0
         
         try:
             # Log search attempt with search term
@@ -1151,40 +1151,10 @@ class VoiceInteraction(QObject):
                     "value": current_value
                 }
             else:
-                # Try to find similar items for "Did you mean?" suggestion
-                suggestions = []
-                if search_engine and hasattr(search_engine, 'inventory_cache'):
-                    from difflib import get_close_matches
-                    # Get close matches from inventory (max 3 suggestions)
-                    matches = get_close_matches(
-                        search_term.lower(), 
-                        search_engine.inventory_cache.keys(), 
-                        n=3, 
-                        cutoff=0.6
-                    )
-                    if matches:
-                        # Get the actual item names (not lowercased keys)
-                        for match_key in matches:
-                            item_info = search_engine.inventory_cache[match_key]
-                            if isinstance(item_info, dict) and 'item' in item_info:
-                                suggestions.append(item_info['item'])
-                            elif isinstance(item_info, str):
-                                suggestions.append(item_info)
-                
-                # Build message with suggestions
-                message = "Item not found"
-                if suggestions:
-                    if len(suggestions) == 1:
-                        message += f". Did you mean {suggestions[0]}?"
-                    else:
-                        suggestion_list = ", ".join(suggestions[:-1]) + f", or {suggestions[-1]}"
-                        message += f". Did you mean {suggestion_list}?"
-                
                 return {
                     "success": False,
-                    "message": message,
-                    "search_term": search_term,
-                    "suggestions": suggestions
+                    "message": "Item not found",
+                    "search_term": search_term
                 }
         except Exception as e:
             logger.error(f"Error handling search: {e}")
@@ -1861,8 +1831,7 @@ class VoiceInteraction(QObject):
                                 duration = (datetime.now() - start_time).total_seconds()
                                 if result.get("success"):
                                     self._track_recognition_performance(True, duration)
-                                    # Play bell chime instead of verbal feedback
-                                    self.play_sound("bell_chime")
+                                    # Skip verbal feedback for success
                                 else:
                                     self._track_recognition_performance(False, duration)
                                     error_message = self._format_error_response(result)
@@ -1899,8 +1868,7 @@ class VoiceInteraction(QObject):
                                 duration = (datetime.now() - start_time).total_seconds()
                                 if result.get("success"):
                                     self._track_recognition_performance(True, duration)
-                                    # Play bell chime instead of verbal feedback
-                                    self.play_sound("bell_chime")
+                                    # Skip verbal feedback for success
                                 else:
                                     self._track_recognition_performance(False, duration)
                                     error_message = self._format_error_response(result)
@@ -1959,8 +1927,7 @@ class VoiceInteraction(QObject):
                         duration = (datetime.now() - start_time).total_seconds()
                         if result.get("success"):
                             self._track_recognition_performance(True, duration)
-                            # Play bell chime instead of verbal feedback
-                            self.play_sound("bell_chime")
+                            # Skip verbal feedback for success
                         else:
                             self._track_recognition_performance(False, duration)
                             error_message = self._format_error_response(result)
@@ -2078,8 +2045,7 @@ class VoiceInteraction(QObject):
                 self._track_recognition_performance(True, duration)
                 if self.state.dugal:
                     success_message = self._format_success_response(result)
-                    if success_message: # Only speak if there's a message
-                        self.speak(success_message)
+                    self.speak(success_message)
             elif result:
                 self._track_recognition_performance(False, duration)
                 if self.state.dugal:
@@ -2742,32 +2708,6 @@ class VoiceInteraction(QObject):
             logger.error(f"Error synthesizing speech: {e}")
             return False
 
-    def play_sound(self, sound_name: str = "bell_chime") -> None:
-        """Play a sound effect for feedback."""
-        try:
-            import winsound
-            import os
-            
-            # Sound file paths
-            assets_dir = os.path.join(os.path.dirname(__file__), "assets")
-            sounds = {
-                "bell_chime": os.path.join(assets_dir, "bell_chime.wav"),
-                "error": os.path.join(assets_dir, "error.wav"),
-            }
-            
-            sound_path = sounds.get(sound_name)
-            if sound_path and os.path.exists(sound_path):
-                # Play sound asynchronously (don't block)
-                winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-                logger.debug(f"Played sound: {sound_name}")
-            else:
-                # Fallback to system beep (800Hz for 200ms)
-                winsound.Beep(800, 200)
-                logger.debug(f"Sound file not found, used system beep")
-        except Exception as e:
-            logger.error(f"Error playing sound: {e}")
-            # Silent failure - don't break the workflow
-    
     def _apply_personality_mode(self, text: str) -> str:
         """Apply personality mode adjustments to speech text."""
         mode = self.state.mode
@@ -3418,21 +3358,9 @@ class VoiceInteraction(QObject):
                 value = result.get("value")
                 
                 if value is not None and value != "unknown":
-                    # Check if value is 0 or empty
-                    try:
-                        numeric_value = float(value)
-                        if numeric_value == 0:
-                            return ""  # Silent - no speech, no bell
-                        else:
-                            return f"{item}, currently at {value}"  # Announce existing value
-                    except (ValueError, TypeError):
-                        # Non-numeric value
-                        if not value or str(value).strip() == "":
-                            return None  # Silent - no speech, no bell
-                        else:
-                            return f"{item}, currently at {value}"
+                    return f"{item}, currently at {value}"
                 else:
-                    return ""  # Unknown value - stay silent
+                    return f"Found {item}"
             
             # ORIGINAL UPDATE LOGIC
             updates = result.get("updates", [])
