@@ -344,18 +344,6 @@ INTERPRETATION GUIDELINES:
    - "knob creek 12 add" → UPDATE (regardless of number)
    - "add 12 to knob creek" → UPDATE
    - "glenlivet 18 plus" → UPDATE
-   
-   KEYWORD: "YEAR" indicates age statement (part of product name):
-   - "old elk eight year" → SEARCH for "Old Elk 8 Year" (age statement)
-   - "glenlivet eighteen year" → SEARCH for "Glenlivet 18 Year" (age statement)
-   - "knob creek twelve year" → SEARCH for "Knob Creek 12 Year" (age statement)
-   - "old elk eight year point six" → SEARCH for "Old Elk 8 Year" + UPDATE to 0.6
-   
-   When "year" keyword is present:
-   - Number BEFORE "year" is part of the product name (age statement)
-   - Number AFTER "year" (especially decimals) is inventory quantity
-   - Intent: "search" if only age statement, "inventory_update" if quantity also present
-   - Extract: item_name includes age (e.g., "Old Elk 8 Year"), quantity is the decimal
 
 3. ITEM NAME MATCHING:
    - Accept partial names: "Tito's" is sufficient for "Tito's Vodka"
@@ -368,21 +356,16 @@ INTERPRETATION GUIDELINES:
    
    Pattern: "[Item Name] [Number]"
    
-   Step 1: Check for "year" keyword
-   - If "year" present → Number BEFORE "year" is age statement (part of name)
-   - Example: "old elk eight year" → SEARCH for "Old Elk 8 Year"
-   - Example: "old elk eight year point six" → item="Old Elk 8 Year", quantity=0.6, UPDATE
-   
-   Step 2: Check for explicit operation word
+   Step 1: Check for explicit operation word
    - If "add", "subtract", "plus", "minus", "set" present → ALWAYS inventory_update
    
-   Step 3: Check number range
+   Step 2: Check number range
    - If number ≥ 1000 → SEARCH (likely product name/year)
    - If number 100-999 → LIKELY UPDATE (mark confidence 0.7, could clarify)
    - If number 26-99 → AMBIGUOUS (confidence 0.4, ASK FOR CLARIFICATION)
    - If number 1-25 → VERY AMBIGUOUS (confidence 0.3, ASK FOR CLARIFICATION)
    
-   Step 4: Check decimal numbers
+   Step 3: Check decimal numbers
    - Decimals (0.1 - 9.9) → LIKELY UPDATE (fractional bottles common)
    
    Examples:
@@ -391,8 +374,6 @@ INTERPRETATION GUIDELINES:
    - "makers mark 150" → inventory_update (confidence 0.9)
    - "glenlivet 1824" → search (confidence 0.95, year = product name)
    - "knob creek add 12" → inventory_update (confidence 1.0, explicit operation)
-   - "old elk eight year" → search (confidence 0.95, age statement)
-   - "old elk eight year point six" → inventory_update (confidence 0.9, item="Old Elk 8 Year", quantity=0.6)
 5. CONFIDENCE SCORING:
    - 0.9-1.0: Crystal clear, unambiguous
    - 0.7-0.9: Clear but minor ambiguity

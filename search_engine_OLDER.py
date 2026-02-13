@@ -437,10 +437,9 @@ class AdaptiveInventorySearchEngine:
                 if not hasattr(self, 'input_column_index'):
                     self.input_column_index = 6
         
-        # Only index selected sheets (if specified), otherwise index all sheets
         sheets_to_index = getattr(self, 'selected_sheets', None) or workbook.sheetnames
-        
-        for sheet in sheets_to_index:
+                
+        for sheet in sheets_to_index: #Only indexes selected sheets
             ws = workbook[sheet]
             self._index_sheet(ws, sheet, column_idx)
         

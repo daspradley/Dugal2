@@ -61,11 +61,6 @@ class VoiceState:
         self.learning_variations = []
         self.active_item_context = None
         
-        # Clarification tracking
-        self.awaiting_clarification = False
-        self.pending_command = None  # Stores the ambiguous command details
-        self.clarification_options = None  # Stores the options presented to user
-        
         # Enhanced statistics tracking
         self.stats = {
             'total_attempts': 0,
@@ -1840,10 +1835,6 @@ class VoiceInteraction(QObject):
                     'timestamp': datetime.now().isoformat()
                 })
 
-            # Check if we're awaiting clarification response
-            if self.state.awaiting_clarification:
-                return self._handle_clarification_response(command)
-
             # Check for active item context (where user previously mentioned an item)
             if hasattr(self.state, 'active_item_context') and self.state.active_item_context:
                 # Check if this is a number or a number with an operation
@@ -2206,25 +2197,6 @@ class VoiceInteraction(QObject):
                     return {"success": False, "message": f"Error: {str(e)}"}
             else:
                 logger.warning(f"Command routing failed: {result.error}")
-                
-                # Check if this is a clarification request from AI
-                if result.error and "Did you mean to search for" in result.error:
-                    # Extract item name and quantity from the error message
-                    # Format: "Did you mean to search for 'X Y Z N' or update X Y Z quantity by N?"
-                    try:
-                        import re
-                        # Try to parse the clarification message
-                        match = re.search(r"search for '(.+?)'\s+or update\s+(.+?)\s+quantity by\s+(\d+)", result.error)
-                        if match:
-                            search_term = match.group(1)  # e.g., "Woodford Reserve Double Oaked 2"
-                            item_name = match.group(2)    # e.g., "Woodford Reserve Double Oaked"
-                            quantity = float(match.group(3))  # e.g., 2
-                            
-                            # Request clarification
-                            return self._request_clarification(item_name, quantity, command)
-                    except Exception as parse_error:
-                        logger.debug(f"Could not parse clarification message: {parse_error}")
-                
                 return {"success": False, "message": result.error}
                 
         except Exception as e:
@@ -2647,102 +2619,6 @@ class VoiceInteraction(QObject):
             
         except Exception as e:
             logger.error(f"Error handling command completion: {e}")
-
-    def _handle_clarification_response(self, response: str) -> Dict[str, Any]:
-        """Handle user's response to a clarification request."""
-        try:
-            response_lower = response.lower().strip()
-            logger.debug(f"Processing clarification response: '{response_lower}'")
-            
-            # Map common responses to actions
-            if response_lower in ['update', 'set', 'set it', 'change', 'change it', 'inventory']:
-                action = 'update'
-            elif response_lower in ['search', 'find', 'find it', 'look up', 'lookup', 'look it up']:
-                action = 'search'
-            elif response_lower in ['yes', 'yeah', 'yep', 'sure', 'correct', 'yup']:
-                # Default to first option (usually update for ambiguous numbers)
-                action = 'update'
-            elif response_lower in ['no', 'nope', 'cancel', 'nevermind', 'never mind', 'stop']:
-                # Cancel the operation
-                self.state.awaiting_clarification = False
-                self.state.pending_command = None
-                self.state.clarification_options = None
-                self.speak("Okay, cancelled.")
-                return {"success": True, "message": "Operation cancelled"}
-            else:
-                # Don't understand the response, ask again
-                self.speak("I didn't understand. Please say 'update', 'search', 'yes', or 'no'.")
-                return {"success": False, "message": "Unclear clarification response"}
-            
-            # Execute the chosen action
-            pending = self.state.pending_command
-            
-            # Clear clarification state
-            self.state.awaiting_clarification = False
-            self.state.pending_command = None
-            self.state.clarification_options = None
-            
-            if action == 'update':
-                # Execute inventory update
-                item_name = pending['item_name']
-                quantity = pending['quantity']
-                logger.debug(f"Executing inventory update: '{item_name}' quantity={quantity}")
-                return self._execute_inventory_update(item_name, quantity)
-                
-            elif action == 'search':
-                # Execute search
-                search_term = pending['search_term']
-                logger.debug(f"Executing search for: '{search_term}'")
-                
-                # Use the search engine to find the item
-                if hasattr(self.state, 'search_engine') and self.state.search_engine:
-                    result = self.state.search_engine.find_item(search_term)
-                    if result and result.get('found'):
-                        # Announce the found item
-                        self.speak(f"Found: {result.get('item')}")
-                        # Store as active item context for potential followup
-                        self.state.active_item_context = result.get('item')
-                        return {"success": True, "item": result.get('item'), "result": result}
-                    else:
-                        self.speak(f"Could not find '{search_term}' in inventory.")
-                        return {"success": False, "message": f"Item not found: {search_term}"}
-                else:
-                    return {"success": False, "message": "Search engine not available"}
-            
-        except Exception as e:
-            logger.error(f"Error handling clarification response: {e}")
-            # Clear clarification state on error
-            self.state.awaiting_clarification = False
-            self.state.pending_command = None
-            self.state.clarification_options = None
-            return {"success": False, "message": f"Error: {str(e)}"}
-
-    def _request_clarification(self, item_name: str, quantity: float, original_command: str) -> Dict[str, Any]:
-        """Request clarification from user when command is ambiguous."""
-        try:
-            # Store pending command details
-            self.state.pending_command = {
-                'item_name': item_name,
-                'quantity': quantity,
-                'search_term': f"{item_name} {int(quantity)}",  # e.g., "Woodford Reserve Double Oaked 2"
-                'original_command': original_command
-            }
-            
-            # Set clarification state
-            self.state.awaiting_clarification = True
-            
-            # Ask for clarification
-            self.speak(f"Did you mean to search for '{item_name} {int(quantity)}' or update {item_name} quantity by {quantity}?")
-            
-            return {
-                "success": False, 
-                "message": "Awaiting clarification",
-                "awaiting_clarification": True
-            }
-            
-        except Exception as e:
-            logger.error(f"Error requesting clarification: {e}")
-            return {"success": False, "message": f"Error: {str(e)}"}
 
     def learn_from_failed_command(self, command: str) -> None:
         """Add unrecognized commands to the learning queue for future dictionary additions."""

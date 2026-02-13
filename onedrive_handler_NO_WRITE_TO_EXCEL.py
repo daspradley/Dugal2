@@ -205,7 +205,6 @@ class OneDriveHandler(QObject):
         This method finds and deletes them to force-unlock the file.
         """
         import os
-        import glob
         
         if not file_path or not os.path.exists(file_path):
             return
@@ -213,23 +212,23 @@ class OneDriveHandler(QObject):
         directory = os.path.dirname(file_path)
         filename = os.path.basename(file_path)
         
-        # Common Excel lock file patterns - use glob wildcards
+        # Common Excel lock file patterns
         lock_patterns = [
-            os.path.join(directory, f"~$*"),  # Excel lock files starting with ~$
-            os.path.join(directory, f".~lock.*#"),  # LibreOffice/OpenOffice lock
+            f"~${filename}",  # Standard Excel lock
+            f".~lock.{filename}#",  # LibreOffice/OpenOffice lock
         ]
         
         deleted_files = []
         
         for pattern in lock_patterns:
-            # Use glob to find all matching files
-            for lock_file_path in glob.glob(pattern):
+            lock_file_path = os.path.join(directory, pattern)
+            if os.path.exists(lock_file_path):
                 try:
                     os.remove(lock_file_path)
-                    deleted_files.append(os.path.basename(lock_file_path))
-                    self.logger.info(f"🔥 DELETED PHANTOM LOCK FILE: {os.path.basename(lock_file_path)}")
+                    deleted_files.append(pattern)
+                    self.logger.info(f"🔥 DELETED PHANTOM LOCK FILE: {pattern}")
                 except Exception as e:
-                    self.logger.warning(f"Failed to delete lock file {os.path.basename(lock_file_path)}: {e}")
+                    self.logger.warning(f"Failed to delete lock file {pattern}: {e}")
         
         if deleted_files:
             self.logger.info(f"Removed {len(deleted_files)} lock file(s): {deleted_files}")
@@ -892,7 +891,7 @@ class OneDriveHandler(QObject):
             # Get the search engine using the standard accessor if available
             search_engine = self.get_search_engine() if hasattr(self, 'get_search_engine') else self.search_engine
 
-            workbook = load_workbook(self.state.local_file_path, data_only=False)
+            workbook = load_workbook(self.state.local_file_path, data_only=True)
             updates = []
 
             # Verify required handlers
