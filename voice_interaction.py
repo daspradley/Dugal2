@@ -35,6 +35,7 @@ from PyQt5.QtCore import QTimer, pyqtSignal, QObject
 from logging_manager import LoggingManager
 from excel_handler import ExcelHandler
 from command_router import CommandRouter, CommandMatch, RouterResult
+from sync_manager import SyncManager
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -747,12 +748,20 @@ class VoiceInteraction(QObject):
 
     def connect_to_search_engine(self, search_engine):
         """Connect voice interaction directly to the search engine."""
-        logger.debug("Connecting voice interaction directly to search engine")
+        logger.debug("Connecting voice interaction directly to the search engine")
         self.state.search_engine = search_engine
         
         # Always register the search engine in the global registry
         from global_registry import GlobalRegistry
         GlobalRegistry.register('search_engine', search_engine)
+        
+        # Initialize SyncManager with the search engine
+        logger.debug("Initializing SyncManager in voice_interaction")
+        self.sync_manager = SyncManager(
+            search_engine=search_engine,
+            google_credentials_path=None  # Can be configured later if needed
+        )
+        logger.debug("SyncManager initialized successfully")
         
         # Diagnose the search engine state
         search_engine.diagnose_search_index()
@@ -791,6 +800,49 @@ class VoiceInteraction(QObject):
             logger.error(f"Error getting search engine: {e}")
             # Fallback to local reference if available
             return getattr(self, 'search_engine', None)
+    
+    def connect_to_file(self, file_path: str) -> Dict[str, Any]:
+        """
+        Connect voice system to an open file via SyncManager.
+        Called after GUI opens a file.
+        
+        Args:
+            file_path: Path to the file that was opened
+            
+        Returns:
+            Dictionary with connection status
+        """
+        try:
+            logger.info(f"Connecting voice system to file: {file_path}")
+            
+            # Open file in SyncManager
+            result = self.sync_manager.open_file(file_path)
+            
+            if result['success']:
+                logger.info(f"✅ Voice system connected to file")
+                logger.info(f"   Temp file: {result['temp_path']}")
+                
+                # Speak confirmation based on personality mode
+                if self.state.personality_mode == 'wild':
+                    self.speak("Alright, I've got the file open. Ready to fuck some shit up!")
+                elif self.state.personality_mode == 'mild':
+                    self.speak("File connected. Ready for inventory updates.")
+                else:
+                    self.speak("The file has been successfully opened and is ready for updates.")
+                
+                return result
+            else:
+                logger.error(f"Failed to connect to file: {result['message']}")
+                self.speak("Hmm, I'm having trouble opening that file.")
+                return result
+                
+        except Exception as e:
+            error_msg = f"Error connecting to file: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {
+                "success": False,
+                "message": error_msg
+            }
 
     def configure_speech_recognizer(self, timeout_ms=8000, end_silence_ms=3000):
         """Configure the speech recognizer with extended timeout parameters."""
@@ -836,8 +888,8 @@ class VoiceInteraction(QObject):
             self.logger.debug("Starting continuous voice recognition...")
             
             # Configure the recognizer with extended timeouts
-            # 7000ms initial timeout, 2000ms end silence timeout
-            self.configure_speech_recognizer(timeout_ms=7000, end_silence_ms=2000)
+            # 8000ms initial timeout, 4000ms end silence timeout
+            self.configure_speech_recognizer(timeout_ms=8000, end_silence_ms=4000)
             
             # Connect callbacks
             self.speech_recognizer.recognized.connect(self._recognized_callback)
@@ -857,7 +909,7 @@ class VoiceInteraction(QObject):
             self.logger.error(f"Error starting speech recognition: {e}")
             return False
 
-    def set_recognition_timeouts(self, initial_timeout_ms=7000, end_silence_ms=2000):
+    def set_recognition_timeouts(self, initial_timeout_ms=8000, end_silence_ms=4000):
         """Adjust speech recognition timeouts dynamically."""
         try:
             if hasattr(self, 'speech_recognizer') and self.speech_recognizer:
@@ -1360,22 +1412,44 @@ class VoiceInteraction(QObject):
             }
 
     def _handle_inventory_item(self, command_match):
-        """Handle commands that match inventory items."""
+        """Handle commands that match inventory items - both lookups AND updates."""
         item_info = command_match.metadata.get('item_info', {})
         item_name = item_info.get('item', command_match.command_text)
         
-        self.speak(f"Found {item_name} in inventory. Current quantity is {item_info.get('value', 'unknown')}.")
+        # Check if this is an UPDATE (has quantity in named_groups from AI)
+        quantity = command_match.named_groups.get('quantity') if hasattr(command_match, 'named_groups') else None
+        operation = command_match.named_groups.get('operation', 'set') if hasattr(command_match, 'named_groups') else 'set'
         
-        # Display result in UI if available
-        if hasattr(self, 'display_result'):
-            self.display_result(item_info)
-        
-        return {
-            'success': True,
-            'action': 'inventory_lookup',
-            'item': item_name,
-            'details': item_info
-        }
+        if quantity is not None:
+            # This is an UPDATE command from AI
+            logger.debug(f"Inventory UPDATE command: {item_name} quantity={quantity} operation={operation}")
+            
+            # Determine if this is an addition/subtraction or direct set
+            is_addition = operation in ['add', 'subtract']
+            
+            # If subtract, make quantity negative
+            if operation == 'subtract':
+                quantity = -quantity
+            
+            # Execute the update
+            result = self._execute_inventory_update(item_name, quantity, is_addition)
+            
+            # Return the result without speaking (silent mode)
+            return result
+        else:
+            # This is a LOOKUP command
+            self.speak(f"Found {item_name} in inventory. Current quantity is {item_info.get('value', 'unknown')}.")
+            
+            # Display result in UI if available
+            if hasattr(self, 'display_result'):
+                self.display_result(item_info)
+            
+            return {
+                'success': True,
+                'action': 'inventory_lookup',
+                'item': item_name,
+                'details': item_info
+            }
 
     def _handle_learn_term(self, match):
         """Handle learning new terms for the dictionary."""
@@ -2130,16 +2204,34 @@ class VoiceInteraction(QObject):
         context = {}
         
         try:
-            # Get Excel handler from dugal
-            if self.state.dugal and hasattr(self.state.dugal, 'excel_handler'):
-                handler = self.state.dugal.excel_handler
-                
-                # Sheet information
-                if hasattr(handler, 'workbook') and handler.workbook:
+            # Get search engine (it has the workbook reference)
+            if self.search_engine:
+                # Sheet information from search engine
+                if hasattr(self.search_engine, 'workbook') and self.search_engine.workbook:
                     try:
-                        context['sheets'] = list(handler.workbook.sheetnames)
+                        context['sheets'] = list(self.search_engine.workbook.sheetnames)
                     except Exception:
                         pass
+                    
+                    # Get column names from first sheet
+                    try:
+                        if self.search_engine.workbook.sheetnames:
+                            first_sheet = self.search_engine.workbook[self.search_engine.workbook.sheetnames[0]]
+                            if first_sheet.max_row > 0:
+                                context['columns'] = [
+                                    cell.value for cell in first_sheet[1] 
+                                    if cell.value
+                                ]
+                    except Exception as e:
+                        logger.debug(f"Could not extract columns: {e}")
+                
+                # Input column info from search engine
+                if hasattr(self.search_engine, 'input_column_name'):
+                    context['input_column'] = self.search_engine.input_column_name
+            
+            # Get Excel handler state from dugal
+            if self.state.dugal and hasattr(self.state.dugal, 'excel_handler'):
+                handler = self.state.dugal.excel_handler
                 
                 # Current state
                 if hasattr(handler, 'active_sheet'):
@@ -2150,21 +2242,6 @@ class VoiceInteraction(QObject):
                 
                 if hasattr(handler, 'search_column'):
                     context['search_column'] = handler.search_column
-                
-                if hasattr(handler, 'input_column'):
-                    context['input_column'] = handler.input_column
-                
-                # Get column names from first sheet
-                if handler.workbook and handler.workbook.sheetnames:
-                    try:
-                        first_sheet = handler.workbook[handler.workbook.sheetnames[0]]
-                        if first_sheet.max_row > 0:
-                            context['columns'] = [
-                                cell.value for cell in first_sheet[1] 
-                                if cell.value
-                            ]
-                    except Exception as e:
-                        logger.debug(f"Could not extract columns: {e}")
             
             # Last item context (for "it", "that", etc.)
             if hasattr(self.state, 'active_item_context') and self.state.active_item_context:
@@ -3347,9 +3424,6 @@ class VoiceInteraction(QObject):
     def _execute_inventory_update(self, item: str, value: float, is_addition: bool = False) -> Dict[str, Any]:
         """Execute comprehensive inventory update with multi-stage validation."""
         try:
-            # Get handlers
-            onedrive_handler = self.state.dugal.onedrive_handler
-            
             # Validate inputs
             if not item or value is None:
                 return {
@@ -3364,8 +3438,17 @@ class VoiceInteraction(QObject):
                     "message": "Update value exceeds reasonable range"
                 }
             
-            # Perform update
-            update_result = onedrive_handler.update_inventory(item, value, is_addition)
+            # Check if file is open in SyncManager
+            if not hasattr(self, 'sync_manager') or not self.sync_manager.is_open:
+                logger.error("No file open in SyncManager")
+                return {
+                    "success": False,
+                    "message": "No file is currently open"
+                }
+            
+            # Perform update via SyncManager
+            logger.debug(f"Executing update via SyncManager: {item} = {value} (is_addition={is_addition})")
+            update_result = self.sync_manager.update_inventory(item, value, is_addition)
             
             # Additional processing if update successful
             if update_result.get('success'):
@@ -3375,6 +3458,10 @@ class VoiceInteraction(QObject):
                         'type': 'inventory_update',
                         'item': item,
                         'value': value,
+                        'is_addition': is_addition,
+                        'result': 'success',
+                        'old_value': update_result.get('old_value'),
+                        'new_value': update_result.get('new_value'),
                         'operation': 'add/subtract' if is_addition else 'set',
                         'timestamp': datetime.now().isoformat()
                     })
@@ -3386,22 +3473,79 @@ class VoiceInteraction(QObject):
                     'confidence': 1.0,
                     'type': 'inventory_update'
                 })
+                
+                logger.info(f"✅ Update successful: {item} = {update_result.get('new_value')}")
+            else:
+                # Log failure
+                if self.state.logging_manager:
+                    self.state.logging_manager.log_error(
+                        f"Inventory update failed: {update_result.get('message')}",
+                        {
+                            'item': item,
+                            'value': value,
+                            'is_addition': is_addition
+                        }
+                    )
+                
+                logger.error(f"❌ Update failed: {update_result.get('message')}")
             
             return update_result
         
         except Exception as e:
-            logger.error(f"Inventory update execution error: {e}")
+            error_msg = f"Error in inventory update: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            
             if self.state.logging_manager:
-                self.state.logging_manager.log_error(str(e), {
-                    'context': 'inventory_update',
+                self.state.logging_manager.log_error(error_msg, {
                     'item': item,
                     'value': value,
-                    'operation': 'add/subtract' if is_addition else 'set'
+                    'is_addition': is_addition,
+                    'exception': str(e)
                 })
             
             return {
                 "success": False,
-                "message": f"Update failed: {str(e)}"
+                "message": error_msg
+            }
+    
+    def auto_save_changes(self) -> Dict[str, Any]:
+        """
+        Auto-save any pending changes to the source file.
+        Can be called periodically or after each update.
+        
+        Returns:
+            Dictionary with save status
+        """
+        try:
+            if not hasattr(self, 'sync_manager') or not self.sync_manager.is_open:
+                return {
+                    "success": False,
+                    "message": "No file is open"
+                }
+            
+            if not self.sync_manager.update_handler.has_unsaved_changes():
+                logger.debug("No unsaved changes to auto-save")
+                return {
+                    "success": True,
+                    "message": "No changes to save"
+                }
+            
+            logger.info("Auto-saving changes...")
+            result = self.sync_manager.save_to_source(backup=True)
+            
+            if result['success']:
+                logger.info(f"✅ Auto-saved {result['changes_saved']} changes")
+            else:
+                logger.error(f"❌ Auto-save failed: {result['message']}")
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error in auto-save: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {
+                "success": False,
+                "message": error_msg
             }
 
     def _extract_inventory_details(self, text: str) -> Tuple[Optional[str], Optional[float]]:

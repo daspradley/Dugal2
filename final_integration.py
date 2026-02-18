@@ -605,6 +605,18 @@ class FileCoordinator:
                 logger.debug("Refreshing voice-to-inventory connection after file load")
                 voice.connect_voice_to_inventory(self.onedrive_handler, self.excel_handler)
                 logger.debug("Voice connection refreshed")
+                
+                # NEW: Connect voice system to file via SyncManager
+                logger.debug("Connecting voice system to file via SyncManager")
+                try:
+                    voice_result = voice.connect_to_file(filepath)
+                    if voice_result['success']:
+                        logger.info(f"✅ Voice system connected to file via SyncManager")
+                        logger.info(f"   Temp file: {voice_result.get('temp_path')}")
+                    else:
+                        logger.warning(f"⚠️ Voice SyncManager connection failed: {voice_result.get('message')}")
+                except Exception as e:
+                    logger.error(f"Error connecting voice to file via SyncManager: {e}")
             
             logger.debug("File successfully opened and coordinated")
             logger.debug(f"Final check - OneDrive handler file path: {self.onedrive_handler.state.local_file_path}")
@@ -2218,6 +2230,19 @@ class FinalIntegration(QMainWindow):
             # Voice interaction cleanup
             if self.state.voice_interaction:
                 try:
+                    # NEW: Save any unsaved changes in SyncManager before cleanup
+                    if hasattr(self.state.voice_interaction, 'sync_manager'):
+                        try:
+                            if self.state.voice_interaction.sync_manager.is_open:
+                                if self.state.voice_interaction.sync_manager.update_handler.has_unsaved_changes():
+                                    logger.warning("⚠️ Unsaved changes detected in SyncManager during shutdown")
+                                    # Optionally auto-save or prompt user
+                                    # self.state.voice_interaction.sync_manager.save_to_source()
+                                self.state.voice_interaction.sync_manager.close_file()
+                                logger.debug("SyncManager closed successfully")
+                        except Exception as e:
+                            logger.error(f"Error cleaning up SyncManager: {e}")
+                    
                     self.state.voice_interaction.cleanup()
                 except Exception as e:
                     logger.error(f"Voice interaction cleanup error: {e}")
