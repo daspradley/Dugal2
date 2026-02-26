@@ -755,13 +755,19 @@ class VoiceInteraction(QObject):
         from global_registry import GlobalRegistry
         GlobalRegistry.register('search_engine', search_engine)
         
-        # Initialize SyncManager with the search engine
-        logger.debug("Initializing SyncManager in voice_interaction")
-        self.sync_manager = SyncManager(
-            search_engine=search_engine,
-            google_credentials_path=None  # Can be configured later if needed
-        )
-        logger.debug("SyncManager initialized successfully")
+        # Only initialize SyncManager if it doesn't already exist
+        if not hasattr(self, 'sync_manager') or self.sync_manager is None:
+            logger.debug("Initializing SyncManager in voice_interaction")
+            self.sync_manager = SyncManager(
+                search_engine=search_engine,
+                google_credentials_path=None  # Can be configured later if needed
+            )
+            logger.debug("SyncManager initialized successfully")
+        else:
+            logger.debug("SyncManager already exists, updating search engine reference")
+            # Update the search engine in the existing SyncManager
+            if hasattr(self.sync_manager, 'search_engine'):
+                self.sync_manager.search_engine = search_engine
         
         # Diagnose the search engine state
         search_engine.diagnose_search_index()
@@ -823,9 +829,9 @@ class VoiceInteraction(QObject):
                 logger.info(f"   Temp file: {result['temp_path']}")
                 
                 # Speak confirmation based on personality mode
-                if self.state.personality_mode == 'wild':
+                if self.state.mode == 'wild':
                     self.speak("Alright, I've got the file open. Ready to fuck some shit up!")
-                elif self.state.personality_mode == 'mild':
+                elif self.state.mode == 'mild':
                     self.speak("File connected. Ready for inventory updates.")
                 else:
                     self.speak("The file has been successfully opened and is ready for updates.")
@@ -844,8 +850,8 @@ class VoiceInteraction(QObject):
                 "message": error_msg
             }
 
-    def configure_speech_recognizer(self, timeout_ms=8000, end_silence_ms=3000):
-        """Configure the speech recognizer with extended timeout parameters."""
+    def configure_speech_recognizer(self, timeout_ms=300000, end_silence_ms=2000):
+        """Configure the speech recognizer with VERY extended timeout parameters for always-listening mode."""
         try:
             # Create a speech configuration with your Azure subscription key and region
             speech_config = speechsdk.SpeechConfig(
@@ -856,14 +862,16 @@ class VoiceInteraction(QObject):
             # Set the recognition language
             speech_config.speech_recognition_language = "en-US"
             
-            # Extended properties for longer recognition
+            # ALWAYS-LISTENING MODE: Extended properties for much longer recognition
+            # 300000ms (5 minutes) initial silence timeout - essentially always on
+            # 2000ms (2 seconds) end silence timeout - wait 2 seconds after you stop talking
             speech_config.set_property(
                 speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, 
-                str(timeout_ms)  # Increase initial silence timeout (default is usually 5000ms)
+                str(timeout_ms)  # 5 minutes - essentially always listening
             )
             speech_config.set_property(
                 speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, 
-                str(end_silence_ms)  # Increase end silence timeout (default is usually 500ms)
+                str(end_silence_ms)  # 2 seconds of silence to detect end of command
             )
             
             # Create an audio configuration using the default microphone
@@ -883,13 +891,14 @@ class VoiceInteraction(QObject):
             return False
 
     def start_recognition(self):
-        """Start continuous voice recognition with extended timeouts."""
+        """Start continuous voice recognition with ALWAYS-LISTENING mode."""
         try:
-            self.logger.debug("Starting continuous voice recognition...")
+            self.logger.debug("Starting continuous voice recognition in ALWAYS-LISTENING mode...")
             
-            # Configure the recognizer with extended timeouts
-            # 8000ms initial timeout, 4000ms end silence timeout
-            self.configure_speech_recognizer(timeout_ms=8000, end_silence_ms=4000)
+            # Configure the recognizer with VERY extended timeouts
+            # 300000ms (5 minutes) initial timeout - essentially always listening
+            # 2000ms (2 seconds) end silence timeout - wait 2 seconds after you stop talking
+            self.configure_speech_recognizer(timeout_ms=300000, end_silence_ms=2000)
             
             # Connect callbacks
             self.speech_recognizer.recognized.connect(self._recognized_callback)
@@ -909,8 +918,8 @@ class VoiceInteraction(QObject):
             self.logger.error(f"Error starting speech recognition: {e}")
             return False
 
-    def set_recognition_timeouts(self, initial_timeout_ms=8000, end_silence_ms=4000):
-        """Adjust speech recognition timeouts dynamically."""
+    def set_recognition_timeouts(self, initial_timeout_ms=300000, end_silence_ms=2000):
+        """Adjust speech recognition timeouts dynamically - defaults to ALWAYS-LISTENING mode."""
         try:
             if hasattr(self, 'speech_recognizer') and self.speech_recognizer:
                 # Stop recognition if active
@@ -2205,18 +2214,18 @@ class VoiceInteraction(QObject):
         
         try:
             # Get search engine (it has the workbook reference)
-            if self.search_engine:
+            if self.state.search_engine:
                 # Sheet information from search engine
-                if hasattr(self.search_engine, 'workbook') and self.search_engine.workbook:
+                if hasattr(self.state.search_engine, 'workbook') and self.state.search_engine.workbook:
                     try:
-                        context['sheets'] = list(self.search_engine.workbook.sheetnames)
+                        context['sheets'] = list(self.state.search_engine.workbook.sheetnames)
                     except Exception:
                         pass
                     
                     # Get column names from first sheet
                     try:
-                        if self.search_engine.workbook.sheetnames:
-                            first_sheet = self.search_engine.workbook[self.search_engine.workbook.sheetnames[0]]
+                        if self.state.search_engine.workbook.sheetnames:
+                            first_sheet = self.state.search_engine.workbook[self.state.search_engine.workbook.sheetnames[0]]
                             if first_sheet.max_row > 0:
                                 context['columns'] = [
                                     cell.value for cell in first_sheet[1] 
@@ -2226,8 +2235,8 @@ class VoiceInteraction(QObject):
                         logger.debug(f"Could not extract columns: {e}")
                 
                 # Input column info from search engine
-                if hasattr(self.search_engine, 'input_column_name'):
-                    context['input_column'] = self.search_engine.input_column_name
+                if hasattr(self.state.search_engine, 'input_column_name'):
+                    context['input_column'] = self.state.search_engine.input_column_name
             
             # Get Excel handler state from dugal
             if self.state.dugal and hasattr(self.state.dugal, 'excel_handler'):
@@ -3439,6 +3448,11 @@ class VoiceInteraction(QObject):
                 }
             
             # Check if file is open in SyncManager
+            logger.debug(f"Checking SyncManager state: hasattr={hasattr(self, 'sync_manager')}")
+            if hasattr(self, 'sync_manager'):
+                logger.debug(f"SyncManager exists, is_open={getattr(self.sync_manager, 'is_open', 'NO ATTRIBUTE')}")
+                logger.debug(f"SyncManager file_path={getattr(self.sync_manager, 'file_path', 'NO ATTRIBUTE')}")
+            
             if not hasattr(self, 'sync_manager') or not self.sync_manager.is_open:
                 logger.error("No file open in SyncManager")
                 return {

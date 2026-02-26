@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CommandInterpretation:
     """Structured interpretation of a voice command."""
-    intent: str  # search, inventory_update, navigate_sheet, set_search_column, set_input_column, system_command, mode_change, unclear
+    intent: str  # search, inventory_update, navigate_sheet, set_search_column, set_input_column, system_command, mode_change, clarification_search, clarification_update, clarification_confirm, clarification_cancel, unclear
     entities: Dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     ambiguities: List[str] = field(default_factory=list)
@@ -268,7 +268,11 @@ INTENT TYPES:
 5. "set_input_column" - User wants to set which column to input data to
 6. "system_command" - System commands (help, status, diagnostics, etc.)
 7. "mode_change" - Changing personality mode (wild, mild, proper)
-8. "unclear" - Command is too ambiguous to interpret confidently
+8. "clarification_search" - User is responding to clarification by choosing search
+9. "clarification_update" - User is responding to clarification by choosing update
+10. "clarification_confirm" - User is confirming a suggestion (yes/correct)
+11. "clarification_cancel" - User is canceling/rejecting a suggestion (no/cancel)
+12. "unclear" - Command is too ambiguous to interpret confidently
 
 ENTITY EXTRACTION RULES BY INTENT:
 
@@ -303,9 +307,21 @@ For "mode_change":
 For "system_command":
   {{"command_type": "help" | "status" | "diagnostics" | "reset" | etc}}
 
+For "clarification_search", "clarification_update", "clarification_confirm", "clarification_cancel":
+  {{}} (no entities needed - these respond to previous clarification request)
+
 INTERPRETATION GUIDELINES:
 
-1. CONTEXT REFERENCES:
+1. CLARIFICATION RESPONSES:
+   When the previous command resulted in a clarification request:
+   - "search" or "search for it" or "find it" → clarification_search
+   - "update" or "update it" or "set it" → clarification_update  
+   - "yes" or "yeah" or "correct" or "that's right" → clarification_confirm
+   - "no" or "nope" or "cancel" or "never mind" → clarification_cancel
+   
+   These intents should have HIGH confidence (0.9+) when they appear as simple responses.
+
+2. CONTEXT REFERENCES:
    - "it", "that", "this" → Use last_item from context
    - "the same", "previous" → Use last_item from context
    - If no context available, mark as ambiguous
@@ -376,18 +392,21 @@ INTERPRETATION GUIDELINES:
    Step 2: Check for explicit operation word
    - If "add", "subtract", "plus", "minus", "set" present → ALWAYS inventory_update
    
-   Step 3: Check number range
+   Step 3: Check decimal numbers FIRST (before checking integer ranges)
+   - Decimals (0.1 - 25.0) → ALWAYS UPDATE (fractional bottles, confidence 0.9)
+   - Example: "breaker wheat 1.1" → inventory_update (confidence 0.9)
+   - Example: "makers mark 0.6" → inventory_update (confidence 0.9)
+   
+   Step 4: Check number range (for integers only)
    - If number ≥ 1000 → SEARCH (likely product name/year)
    - If number 100-999 → LIKELY UPDATE (mark confidence 0.7, could clarify)
    - If number 26-99 → AMBIGUOUS (confidence 0.4, ASK FOR CLARIFICATION)
    - If number 1-25 → VERY AMBIGUOUS (confidence 0.3, ASK FOR CLARIFICATION)
    
-   Step 4: Check decimal numbers
-   - Decimals (0.1 - 9.9) → LIKELY UPDATE (fractional bottles common)
-   
    Examples:
-   - "makers mark 3" → unclear (confidence 0.3)
-   - "makers mark 0.6" → inventory_update (confidence 0.8, decimals = bottles)
+   - "makers mark 3" → unclear (confidence 0.3, integer in ambiguous range)
+   - "makers mark 0.6" → inventory_update (confidence 0.9, decimal = always bottles)
+   - "breaker wheat 1.1" → inventory_update (confidence 0.9, decimal = always bottles)
    - "makers mark 150" → inventory_update (confidence 0.9)
    - "glenlivet 1824" → search (confidence 0.95, year = product name)
    - "knob creek add 12" → inventory_update (confidence 1.0, explicit operation)
@@ -462,6 +481,46 @@ Command: "Use the price column"
 {{
   "intent": "set_input_column",
   "entities": {{"column_name": "price"}},
+  "confidence": 0.9,
+  "ambiguities": [],
+  "suggested_clarification": null
+}}
+
+CLARIFICATION RESPONSE EXAMPLES:
+
+When Dugal asks: "Did you mean to search for 'X' or update X quantity by N?"
+
+Command: "search" or "search for it" or "find it"
+{{
+  "intent": "clarification_search",
+  "entities": {{}},
+  "confidence": 0.95,
+  "ambiguities": [],
+  "suggested_clarification": null
+}}
+
+Command: "update" or "update it" or "set it"
+{{
+  "intent": "clarification_update",
+  "entities": {{}},
+  "confidence": 0.95,
+  "ambiguities": [],
+  "suggested_clarification": null
+}}
+
+Command: "yes" or "yeah" or "correct" or "that's right"
+{{
+  "intent": "clarification_confirm",
+  "entities": {{}},
+  "confidence": 0.9,
+  "ambiguities": [],
+  "suggested_clarification": null
+}}
+
+Command: "no" or "nope" or "cancel" or "never mind"
+{{
+  "intent": "clarification_cancel",
+  "entities": {{}},
   "confidence": 0.9,
   "ambiguities": [],
   "suggested_clarification": null

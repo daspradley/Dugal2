@@ -418,9 +418,10 @@ class DictionaryManager(QWidget):
         # Process each term
         variations_added = 0
         for term in inventory_terms:
+            # Generate variations for the full term
             variations = self.generate_phonetic_variations(term)
             if variations:
-                # Add to search engine patterns
+                # Add to search engine patterns for full term
                 if term not in search_engine.learned_patterns:
                     search_engine.learned_patterns[term] = set()
                 
@@ -429,9 +430,24 @@ class DictionaryManager(QWidget):
                     if variation != term:  # Don't add self as variation
                         search_engine.learned_patterns[term].add(variation)
                         variations_added += 1
+            
+            # CRITICAL FIX: Also generate variations for EACH WORD in the term
+            words = term.split()
+            if len(words) > 1:
+                for word in words:
+                    if len(word) > 2:  # Skip very short words
+                        word_variations = self.generate_phonetic_variations(word)
+                        if word_variations:
+                            if word not in search_engine.learned_patterns:
+                                search_engine.learned_patterns[word] = set()
+                            
+                            for variation in word_variations:
+                                if variation != word:
+                                    search_engine.learned_patterns[word].add(variation)
+                                    variations_added += 1
         
         # Save updated patterns
-        search_engine.save_learned_patterns()
+        # search_engine.save_learned_patterns()  # TODO: Re-enable if needed
         logger.debug(f"Added {variations_added} phonetic variations for {len(inventory_terms)} terms")
         return variations_added
 
@@ -450,8 +466,27 @@ class DictionaryManager(QWidget):
         variations = set()
         words = term.lower().split()
         
+        # Common abbreviations mapping (both directions)
+        abbrev_map = {
+            'double': ['dbl', 'dble'],
+            'dbl': ['double', 'dble'],
+            'reserve': ['res', 'rsrv', 'resv'],
+            'res': ['reserve', 'rsrv'],
+            'single': ['sngl', 'sgl'],
+            'barrel': ['brl', 'bar'],
+            'private': ['prvt', 'priv'],
+            'straight': ['str8', 'strt'],
+            'rye': ['ry'],
+            'whiskey': ['whisky', 'whsky', 'wsky'],
+            'whisky': ['whiskey', 'whsky', 'wsky']
+        }
+        
         # Process each word
         for word in words:
+            # Check for abbreviation matches
+            if word in abbrev_map:
+                variations.update(abbrev_map[word])
+            
             # Get metaphone codes for the word
             primary, secondary = doublemetaphone(word)
             
@@ -487,6 +522,14 @@ class DictionaryManager(QWidget):
                 # Skip a word
                 subset = words[:i] + words[i+1:]
                 result_variations.add(' '.join(subset))
+            
+            # CRITICAL: Add abbreviation variations for multi-word terms
+            for i, word in enumerate(words):
+                if word in abbrev_map:
+                    for abbrev in abbrev_map[word]:
+                        new_words = words.copy()
+                        new_words[i] = abbrev
+                        result_variations.add(' '.join(new_words))
         
         # Add variations with different spellings
         for variation in variations:

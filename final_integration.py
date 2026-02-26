@@ -451,10 +451,11 @@ def check_and_close_excel_instances():
 class FileCoordinator:
     """Coordinates file operations between OneDrive and Excel."""
     
-    def __init__(self, excel_handler, onedrive_handler, logging_manager=None):
+    def __init__(self, excel_handler, onedrive_handler, logging_manager=None, dictionary_manager=None):
         self.excel_handler = excel_handler
         self.onedrive_handler = onedrive_handler
         self.logging_manager = logging_manager
+        self.dictionary_manager = dictionary_manager
         self.state = CoordinationState()
         
         # Use the configuration value instead of hardcoded
@@ -577,6 +578,28 @@ class FileCoordinator:
                 logger.error("Failed to load file in Excel")
                 self.onedrive_handler.unlock_file()  # Release lock if Excel fails
                 return False
+            
+            logger.debug("=== PROCESSING INVENTORY TERMS FOR DICTIONARY ===")
+            
+            # After the file is successfully loaded - ALWAYS process inventory terms
+            try:
+                if hasattr(self, 'dictionary_manager') and self.dictionary_manager:
+                    logger.debug("Dictionary manager available - processing inventory terms")
+                    if hasattr(self.excel_handler, 'search_engine') and self.excel_handler.search_engine:
+                        logger.debug(f"Search engine available with {len(self.excel_handler.search_engine.inventory_cache) if hasattr(self.excel_handler.search_engine, 'inventory_cache') else 0} items")
+                        variations_added = self.dictionary_manager.process_inventory_terms(
+                            workbook=self.excel_handler.state.workbook,
+                            search_engine=self.excel_handler.search_engine
+                        )
+                        logger.info(f"✅ Added {variations_added} phonetic variations to search engine")
+                    else:
+                        logger.warning("Search engine not available for dictionary processing")
+                else:
+                    logger.warning("Dictionary manager not available")
+            except Exception as e:
+                logger.error(f"Error processing inventory terms: {e}")
+            
+            logger.debug("=== DICTIONARY PROCESSING COMPLETE ===")
                 
             # After the file is successfully loaded
             if hasattr(self.excel_handler, 'search_engine') and hasattr(self, 'dictionary_manager'):
@@ -1233,7 +1256,8 @@ class FinalIntegration(QMainWindow):
             self.state.file_coordinator = FileCoordinator(
                 self.state.excel_handler,
                 self.state.one_drive_handler,
-                logging_manager=self.state.logging_manager
+                logging_manager=self.state.logging_manager,
+                dictionary_manager=self.state.dictionary_manager
             )
             GlobalRegistry.register('file_coordinator', self.state.file_coordinator)
             self.state.initialized_components['coordinator'] = True

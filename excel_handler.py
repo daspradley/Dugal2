@@ -968,6 +968,18 @@ class ExcelHandler(QWidget):
                 
             logger.debug(f"Connected voice interaction to search engine with {len(self.search_engine.inventory_cache) if hasattr(self.search_engine, 'inventory_cache') else 0} items")
             
+            # CRITICAL: Connect voice system to file via SyncManager
+            logger.debug("Connecting voice system to file via SyncManager...")
+            try:
+                voice_result = self.state.dugal.voice_interaction.connect_to_file(self.state.file_path)
+                if voice_result and voice_result.get('success'):
+                    logger.info(f"✅ Voice system connected to file via SyncManager")
+                    logger.info(f"   Temp file: {voice_result.get('temp_path')}")
+                else:
+                    logger.warning(f"⚠️ Voice SyncManager connection failed: {voice_result.get('message') if voice_result else 'No result returned'}")
+            except Exception as e:
+                logger.error(f"❌ Error connecting voice to file via SyncManager: {e}")
+            
             # Force voice interaction to diagnose its search engine connection
             if hasattr(self.state.dugal.voice_interaction, 'diagnose_search_engine'):
                 self.state.dugal.voice_interaction.diagnose_search_engine()
