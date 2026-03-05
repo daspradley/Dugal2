@@ -36,6 +36,7 @@ from logging_manager import LoggingManager
 from excel_handler import ExcelHandler
 from command_router import CommandRouter, CommandMatch, RouterResult
 from sync_manager import SyncManager
+from phrase_list_manager import PhraseListManager
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -732,6 +733,10 @@ class VoiceInteraction(QObject):
             # Setup event handlers
             self._setup_event_handlers()
             
+            # Initialize Phrase List Manager for document-based vocabulary
+            self.phrase_manager = PhraseListManager()
+            logger.debug("Phrase List Manager initialized")
+            
             logger.debug("Voice interaction system initialized successfully")
             
         except Exception as e:
@@ -773,6 +778,26 @@ class VoiceInteraction(QObject):
         search_engine.diagnose_search_index()
         logger.debug("Voice interaction connected to search engine with cache size: %d", 
                     len(search_engine.inventory_cache) if hasattr(search_engine, 'inventory_cache') else 0)
+        
+        # Setup document vocabulary if workbook is available
+        if hasattr(search_engine, 'workbook') and search_engine.workbook:
+            logger.info("Workbook detected - setting up document vocabulary for Azure Speech")
+            
+            # Determine search column from search engine
+            search_column = "A"  # Default
+            if hasattr(search_engine, 'search_column') and search_engine.search_column:
+                search_column = search_engine.search_column
+            
+            # Load phrases from document
+            try:
+                self.setup_document_vocabulary(
+                    search_engine.workbook,
+                    search_column
+                )
+            except Exception as e:
+                logger.error(f"Error setting up document vocabulary: {e}")
+        else:
+            logger.debug("No workbook available yet - vocabulary will load when file opens")
 
     def get_search_engine(self):
         """Get the search engine from the global registry or local reference."""
@@ -882,6 +907,12 @@ class VoiceInteraction(QObject):
                 speech_config=speech_config, 
                 audio_config=audio_config
             )
+            
+            # Load cached phrases into recognizer for better recognition
+            if hasattr(self, 'phrase_manager') and self.phrase_manager.get_phrase_count() > 0:
+                logger.info("Loading cached phrases into Azure Speech recognizer")
+                loaded = self.phrase_manager.load_phrases_into_azure(self.speech_recognizer)
+                logger.info(f"Loaded {loaded} phrases into Azure Speech for improved recognition")
             
             self.logger.debug(f"Speech recognizer configured with extended timeouts: initial={timeout_ms}ms, end silence={end_silence_ms}ms")
             return True
@@ -1897,6 +1928,159 @@ class VoiceInteraction(QObject):
             logger.error(f"Error setting up event handlers: {e}")
             raise
 
+
+    def preprocess_spoken_text(self, text: str) -> str:
+        """
+        Convert spoken number words to digits before command processing.
+
+        Handles:
+          - Single digits:          "one" -> "1"
+          - Decimal phrases:        "zero point four" -> "0.4"
+          - Multi-digit decimals:   "zero point seven five" -> "0.75"
+          - Negative values:        "negative one point two" -> "-1.2"
+          - Already-numeric text:   "0.4" unchanged
+
+        Examples:
+            "buffalo trace zero point four"     -> "buffalo trace 0.4"
+            "blantons zero point seven five"    -> "blantons 0.75"
+            "hennessy two"                      -> "hennessy 2"
+        """
+        import re
+
+        digit_map = {
+            'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+            'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+        }
+        number_map = {
+            **digit_map,
+            'ten': '10', 'eleven': '11', 'twelve': '12',
+            'half': '0.5', 'quarter': '0.25',
+        }
+
+        result = text
+
+        # Step 1: Handle "X point Y [Z ...]" decimal patterns
+        # Captures one whole-digit word + "point" + one or more decimal digit words
+        # e.g. "zero point seven five" -> "0.75"
+        digit_pattern = '|'.join(digit_map.keys())
+
+        def replace_decimal(m):
+            whole = digit_map.get(m.group(1).lower(), m.group(1))
+            frac_words = re.split(r'\s+', m.group(2).strip())
+            frac = ''.join(digit_map.get(w.lower(), w) for w in frac_words)
+            return f"{whole}.{frac}"
+
+        result = re.sub(
+            rf'\b({digit_pattern})\s+point\s+((?:(?:{digit_pattern})\s*)+)',
+            replace_decimal, result, flags=re.IGNORECASE,
+        )
+
+        # Step 2: Replace standalone number words
+        def replace_number(m):
+            return number_map.get(m.group(0).lower(), m.group(0))
+
+        all_words = '|'.join(sorted(number_map.keys(), key=len, reverse=True))
+        result = re.sub(
+            rf'\b({all_words})\b',
+            replace_number, result, flags=re.IGNORECASE,
+        )
+
+        # Step 3: Handle "negative" / "minus" prefix before a digit
+        result = re.sub(r'\bnegative\s+(\d)', r'-\1', result, flags=re.IGNORECASE)
+        result = re.sub(r'\bminus\s+(\d)',    r'-\1', result, flags=re.IGNORECASE)
+
+        if result != text:
+            logger.debug(f"preprocess_spoken_text: '{text}' -> '{result}'")
+
+        return result
+
+    def setup_document_vocabulary(self, workbook, search_column: str = "A"):
+        """
+        Extract vocabulary from Excel document and load into Azure Speech.
+        
+        This dramatically improves recognition accuracy by telling Azure
+        to EXPECT the terms in your document - exactly like Word dictation!
+        
+        Args:
+            workbook: openpyxl workbook object
+            search_column: Column containing searchable terms (default: "A")
+        """
+        logger.info("Setting up document vocabulary in Azure Speech")
+        
+        try:
+            # Extract phrases from workbook
+            phrases = self.phrase_manager.extract_phrases_from_workbook(
+                workbook, 
+                search_column
+            )
+            
+            # Cache phrases (with variations)
+            self.phrase_manager.cache_phrases(
+                phrases,
+                source_file=getattr(workbook, '_file_path', 'unknown')
+            )
+            
+            # Optional: Save cache for faster reopening
+            self.phrase_manager.save_cache_to_json()
+            
+            # Load phrases into Azure Speech Recognizer
+            if hasattr(self, 'recognizer') and self.recognizer:
+                loaded_count = self.phrase_manager.load_phrases_into_azure(
+                    self.recognizer
+                )
+                
+                logger.info(f"✅ Document vocabulary loaded: {loaded_count} phrases")
+                logger.info(f"   Base phrases: {self.phrase_manager.get_phrase_count()}")
+                logger.info(f"   Total variations: {self.phrase_manager.get_variation_count()}")
+                
+                return True
+            else:
+                logger.warning("No recognizer available - phrases cached but not loaded")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error setting up document vocabulary: {e}")
+            return False
+    
+    def add_dynamic_phrase(self, phrase: str):
+        """
+        Add a new phrase to Azure Speech on-the-fly.
+        
+        Use this when new items are added to inventory during runtime.
+        
+        Args:
+            phrase: New phrase to add (e.g., new product name)
+        """
+        if not phrase:
+            return
+        
+        try:
+            # Add to cache
+            self.phrase_manager.add_phrase(phrase)
+            
+            # If recognizer is active, note that it will be active on next session
+            if hasattr(self, 'recognizer') and self.recognizer:
+                logger.debug(f"Added phrase to cache: {phrase}")
+                logger.debug("Phrase will be active on next recognition session")
+            
+        except Exception as e:
+            logger.error(f"Error adding dynamic phrase: {e}")
+    
+    def get_vocabulary_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about the loaded vocabulary.
+        
+        Returns:
+            Dictionary with vocabulary statistics
+        """
+        return {
+            "phrase_count": self.phrase_manager.get_phrase_count(),
+            "variation_count": self.phrase_manager.get_variation_count(),
+            "source_file": self.phrase_manager.source_file,
+            "last_updated": self.phrase_manager.last_updated.isoformat() if self.phrase_manager.last_updated else None,
+            "cache_loaded": self.phrase_manager.get_phrase_count() > 0
+        }
+
     def process_voice_command(self, command: str) -> Dict[str, Any]:
         """Process voice commands including dictionary learning."""
         logger.debug(f"Processing voice command: '{command}'")
@@ -2023,6 +2207,9 @@ class VoiceInteraction(QObject):
             # Check for learning mode
             if self.state.learning_mode:
                 return self._handle_learning_mode_input(command)
+
+            # Preprocess: convert spoken number words to digits (e.g. "zero point four" -> "0.4")
+            command = self.preprocess_spoken_text(command)
 
             # Normalize and correct potential spelling/pattern issues
             corrected_command = self.correct_spelling(command)
