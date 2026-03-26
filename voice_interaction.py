@@ -1,9 +1,10 @@
+from __future__ import annotations
+
+print(f"LOADED VOICE_INTERACTION FROM: {__file__}")
 """
 Enhanced Voice Interaction Module for Dugal Inventory System.
 Combines speech recognition, synthesis, command processing, and pattern learning.
 """
-
-from __future__ import annotations
 import os
 import sys
 import json
@@ -673,6 +674,10 @@ class VoiceInteraction(QObject):
         ) -> None:
         """Initialize voice interaction system with improved error handling."""
         super().__init__()
+        
+        # VERSION IDENTIFIER - Updated each deployment
+        VERSION = "2026-03-19_16:15_PHRASE_LIST_FIX_v6_CALLBACKS"
+        logger.debug(f"🔥 VOICE_INTERACTION VERSION: {VERSION}")
         logger.debug("Initializing voice interaction system...")
         self.logger = logging.getLogger(__name__)
         
@@ -685,6 +690,10 @@ class VoiceInteraction(QObject):
                 azure_key = os.getenv('AZURE_SPEECH_KEY', '8f7f210f78064aa6929fad817c2be132')
             if not azure_region:
                 azure_region = os.getenv('AZURE_REGION', 'centralus')
+            
+            # Store Azure credentials as instance variables
+            self.speech_key = azure_key
+            self.speech_region = azure_region
                 
             # Configure Dugal and logging
             self.state.dugal = dugal
@@ -880,8 +889,8 @@ class VoiceInteraction(QObject):
         try:
             # Create a speech configuration with your Azure subscription key and region
             speech_config = speechsdk.SpeechConfig(
-                subscription=self.state.speech_key, 
-                region=self.state.speech_region
+                subscription=self.speech_key, 
+                region=self.speech_region
             )
             
             # Set the recognition language
@@ -908,11 +917,7 @@ class VoiceInteraction(QObject):
                 audio_config=audio_config
             )
             
-            # Load cached phrases into recognizer for better recognition
-            if hasattr(self, 'phrase_manager') and self.phrase_manager.get_phrase_count() > 0:
-                logger.info("Loading cached phrases into Azure Speech recognizer")
-                loaded = self.phrase_manager.load_phrases_into_azure(self.speech_recognizer)
-                logger.info(f"Loaded {loaded} phrases into Azure Speech for improved recognition")
+            # NOTE: Phrases will be loaded in start_recognition() after recognizer is fully ready
             
             self.logger.debug(f"Speech recognizer configured with extended timeouts: initial={timeout_ms}ms, end silence={end_silence_ms}ms")
             return True
@@ -931,12 +936,24 @@ class VoiceInteraction(QObject):
             # 2000ms (2 seconds) end silence timeout - wait 2 seconds after you stop talking
             self.configure_speech_recognizer(timeout_ms=300000, end_silence_ms=2000)
             
-            # Connect callbacks
+            # CRITICAL: Load cached phrases into the newly created recognizer
+            if hasattr(self, 'phrase_manager') and self.phrase_manager.get_phrase_count() > 0:
+                self.logger.info("Loading cached phrases into Azure Speech recognizer")
+                try:
+                    loaded = self.phrase_manager.load_phrases_into_azure(self.speech_recognizer)
+                    self.logger.info(f"✅ Loaded {loaded} phrases into Azure Speech for improved recognition")
+                except Exception as e:
+                    self.logger.error(f"Error loading phrases into recognizer: {e}")
+            else:
+                self.logger.debug("No cached phrases to load (phrase manager not initialized or empty)")
+            
+            # Connect callbacks to handle recognized speech
             self.speech_recognizer.recognized.connect(self._recognized_callback)
             self.speech_recognizer.recognizing.connect(self._recognizing_callback)
             self.speech_recognizer.session_started.connect(self._session_started_callback)
             self.speech_recognizer.session_stopped.connect(self._session_stopped_callback)
             self.speech_recognizer.canceled.connect(self._canceled_callback)
+            self.logger.debug("Azure Speech event callbacks connected")
             
             # Start continuous recognition
             self.speech_recognizer.start_continuous_recognition()
@@ -948,6 +965,48 @@ class VoiceInteraction(QObject):
         except Exception as e:
             self.logger.error(f"Error starting speech recognition: {e}")
             return False
+
+    def _recognized_callback(self, evt):
+        """Handle recognized speech from Azure Speech SDK."""
+        try:
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                recognized_text = evt.result.text
+                self.logger.info(f"✅ Azure Speech recognized: '{recognized_text}'")
+                # Process the recognized text through command router
+                if hasattr(self, 'command_router') and self.command_router:
+                    self.command_router.route_command(recognized_text)
+        except Exception as e:
+            self.logger.error(f"Error in recognized callback: {e}")
+
+    def _recognizing_callback(self, evt):
+        """Handle partial recognition results (real-time transcription)."""
+        try:
+            if evt.result.reason == speechsdk.ResultReason.RecognizingSpeech:
+                self.logger.debug(f"Recognizing: '{evt.result.text}'")
+        except Exception as e:
+            self.logger.error(f"Error in recognizing callback: {e}")
+
+    def _session_started_callback(self, evt):
+        """Handle session start."""
+        self.logger.info("🎤 Azure Speech session started")
+
+    def _session_stopped_callback(self, evt):
+        """Handle session stop."""
+        self.logger.info("🎤 Azure Speech session stopped")
+
+    def _canceled_callback(self, evt):
+        """Handle recognition cancellation."""
+        try:
+            if evt.reason == speechsdk.CancellationReason.Error:
+                self.logger.error(f"Azure Speech recognition canceled due to error: {evt.error_details}")
+            else:
+                self.logger.warning(f"Azure Speech recognition canceled: {evt.reason}")
+        except Exception as e:
+            self.logger.error(f"Error in canceled callback: {e}")
+
+    def start_listening(self):
+        """Alias for start_recognition() for backward compatibility."""
+        return self.start_recognition()
 
     def set_recognition_timeouts(self, initial_timeout_ms=300000, end_silence_ms=2000):
         """Adjust speech recognition timeouts dynamically - defaults to ALWAYS-LISTENING mode."""
@@ -2659,56 +2718,6 @@ class VoiceInteraction(QObject):
         except Exception as e:
             logger.error(f"Error processing inventory command: {e}")
             return None
-
-    def start_listening(self) -> None:
-        """Start continuous voice recognition with enhanced error handling."""
-        logger.debug("Starting continuous voice recognition...")
-        
-        try:
-            if not self.state.recognizer:
-                raise RuntimeError("Speech recognizer not initialized")
-            
-            # Emit started signal
-            self.speech_started.emit()
-            
-            with sr.Microphone() as source:
-                # Configure recognizer for optimal performance
-                self._configure_recognition(source)
-                
-                while True:
-                    try:
-                        # Listen for audio input
-                        audio = self.state.recognizer.listen(
-                            source,
-                            timeout=5,
-                            phrase_time_limit=20
-                        )
-                        
-                        # Process the audio
-                        self._process_audio(audio)
-                        
-                    except sr.WaitTimeoutError:
-                        # Normal timeout, continue listening
-                        continue
-                        
-                    except sr.UnknownValueError:
-                        logger.debug("Could not understand audio")
-                        self._handle_recognition_error("unknown_value")
-                        continue
-                        
-                    except sr.RequestError as e:
-                        logger.error(f"Recognition service error: {e}")
-                        self._handle_recognition_error("service_error", str(e))
-                        self._attempt_service_recovery()
-                        
-                    except Exception as e:
-                        logger.error(f"Unexpected listening error: {e}")
-                        self._handle_recognition_error("unexpected", str(e))
-                        
-        except Exception as e:
-            logger.error(f"Error starting voice recognition: {e}")
-            self.speech_ended.emit()
-            raise
 
     def _configure_recognition(self, source: sr.Microphone) -> None:
         """Configure speech recognizer for optimal performance."""
