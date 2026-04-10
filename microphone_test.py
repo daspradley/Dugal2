@@ -778,6 +778,9 @@ class EnhancedMicrophoneTest(QWidget):
             #Create AudioResult but DON'T emit the signal here-- emit on_proceed
             self.audio_result = AudioResult.from_audio_data(audio)
             self.audio_result.recognized_text = heard_text
+            # Attach the confirmed device index so _handle_test_complete can
+            # pass it to voice_interaction for Azure microphone selection
+            self.audio_result.device_index = self.current_mic_index
             
         except sr.UnknownValueError:
             self.components.heard_text_label.setText("Heard text: Could not understand speech.")

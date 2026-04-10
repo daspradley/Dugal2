@@ -457,6 +457,14 @@ class FileCoordinator:
         self.logging_manager = logging_manager
         self.dictionary_manager = dictionary_manager
         self.state = CoordinationState()
+
+        # Register onedrive_handler so SyncManager can find it for brief
+        # lock/unlock during save-to-source without needing a direct reference
+        try:
+            from global_registry import GlobalRegistry
+            GlobalRegistry.register('onedrive_handler', onedrive_handler)
+        except Exception:
+            pass
         
         # Use the configuration value instead of hardcoded
         self.REFRESH_INTERVAL = DugalConfig.REFRESH_INTERVAL  # Replace the hardcoded 2
@@ -559,7 +567,7 @@ class FileCoordinator:
             # Re-set filepath just to be sure
             self.onedrive_handler.state.local_file_path = filepath
             
-            # Lock the file in OneDrive
+            # Lock the file briefly while we copy it to temp
             if not self.onedrive_handler.lock_file():
                 from PyQt5.QtWidgets import QMessageBox
                 QMessageBox.warning(
@@ -578,6 +586,12 @@ class FileCoordinator:
                 logger.error("Failed to load file in Excel")
                 self.onedrive_handler.unlock_file()  # Release lock if Excel fails
                 return False
+
+            # Release the lock immediately — the temp copy is made during
+            # load_excel_file / SyncManager.open_file().  The original is now
+            # free for other users to read while this Dugal session runs.
+            self.onedrive_handler.unlock_file()
+            logger.debug("Original file unlocked — session working from temp copy")
             
             logger.debug("=== PROCESSING INVENTORY TERMS FOR DICTIONARY ===")
             
@@ -636,6 +650,27 @@ class FileCoordinator:
                     if voice_result['success']:
                         logger.info(f"✅ Voice system connected to file via SyncManager")
                         logger.info(f"   Temp file: {voice_result.get('temp_path')}")
+
+                        # Wire instant-refresh: every cell write fires
+                        # excel_handler.cell_updated which bypasses the timer
+                        # and reloads from the temp file immediately.
+                        try:
+                            sm = voice.sync_manager
+                            if sm.is_open:
+                                uh = sm.update_handler
+                                eh = self.excel_handler
+
+                                def _instant_refresh():
+                                    # Reset last_refresh so the throttle doesn't block
+                                    self.excel_handler.state.last_refresh = None
+                                    self.excel_handler.refresh_view()
+
+                                uh._on_cell_updated = _instant_refresh
+                                # Also connect the Qt signal path
+                                eh.cell_updated.connect(_instant_refresh)
+                                logger.info("✅ Instant-refresh wired: display tracks temp file")
+                        except Exception as wire_err:
+                            logger.warning(f"Could not wire instant refresh: {wire_err}")
                     else:
                         logger.warning(f"⚠️ Voice SyncManager connection failed: {voice_result.get('message')}")
                 except Exception as e:
@@ -2205,6 +2240,27 @@ class FinalIntegration(QMainWindow):
         """Clean up all components before shutdown."""
         logger.debug("Starting cleanup")
         try:
+            # ── Save temp file back to source before anything else shuts down ──
+            try:
+                vi = getattr(self.state, 'voice_interaction', None)
+                if vi and hasattr(vi, 'sync_manager') and vi.sync_manager.is_open:
+                    sm = vi.sync_manager
+                    if sm.update_handler.has_unsaved_changes():
+                        logger.info("Saving Dugal changes back to source file on shutdown...")
+                        result = sm.save_to_source()
+                        if result.get('success'):
+                            logger.info(
+                                f"✅ Changes saved to: {sm.source_path} "
+                                f"({result.get('changes_saved', '?')} changes)"
+                            )
+                        else:
+                            logger.error(f"Save-on-close failed: {result.get('message')}")
+                    else:
+                        logger.debug("No unsaved changes — skipping save-on-close")
+                    sm.close_file(save_changes=False)   # already saved above, just clean up temp
+            except Exception as save_err:
+                logger.error(f"Error during save-on-close: {save_err}")
+
             # Clean up in reverse order of initialization
             
             # Save patterns before cleanup
@@ -2278,6 +2334,21 @@ class FinalIntegration(QMainWindow):
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
+    def closeEvent(self, event):
+        """Explicitly quit the Qt application on main window close.
+
+        Because we set QuitOnLastWindowClosed=False (to prevent the Azure
+        recognition thread from being killed when the control panel is the
+        only remaining window), we must call app.quit() ourselves here so
+        closing the main window still exits properly.
+        """
+        try:
+            self.cleanup()
+        except Exception as e:
+            logger.error(f"Error during close cleanup: {e}")
+        event.accept()
+        QApplication.instance().quit()
+
 
 def run_final_integration() -> None:
     """Run the final integration application."""
@@ -2289,6 +2360,11 @@ def run_final_integration() -> None:
         cleanup_json_files()
 
         app = QApplication(sys.argv)
+        
+        # Don't quit just because a window closes — we manage shutdown explicitly
+        # through FinalIntegration.closeEvent so the Azure recognition thread
+        # isn't killed when the main window hides/closes before the control panel.
+        app.setQuitOnLastWindowClosed(False)
         
         # Check and close Excel instances
         check_and_close_excel_instances()

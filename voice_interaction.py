@@ -676,7 +676,7 @@ class VoiceInteraction(QObject):
         super().__init__()
         
         # VERSION IDENTIFIER - Updated each deployment
-        VERSION = "2026-03-19_16:15_PHRASE_LIST_FIX_v6_CALLBACKS"
+        VERSION = "2026-04-09_FULL_PIPELINE_v8"
         logger.debug(f"🔥 VOICE_INTERACTION VERSION: {VERSION}")
         logger.debug("Initializing voice interaction system...")
         self.logger = logging.getLogger(__name__)
@@ -685,11 +685,24 @@ class VoiceInteraction(QObject):
             # Initialize state
             self.state = VoiceState(dugal=dugal)
             
-            # Get Azure credentials from environment if not provided
+            # Get Azure credentials — load .env first so os.getenv picks them up
+            try:
+                from dotenv import load_dotenv
+                import pathlib
+                # Look for .env in the project directory
+                env_path = pathlib.Path(__file__).parent / ".env"
+                if env_path.exists():
+                    load_dotenv(env_path)
+                    logger.debug(f"Loaded .env from {env_path}")
+                else:
+                    load_dotenv()  # search default locations
+            except ImportError:
+                pass  # python-dotenv not installed, rely on os.environ
+
             if not azure_key:
-                azure_key = os.getenv('AZURE_SPEECH_KEY', '8f7f210f78064aa6929fad817c2be132')
+                azure_key = os.getenv('AZURE_SPEECH_KEY') or os.getenv('SPEECH_KEY', '')
             if not azure_region:
-                azure_region = os.getenv('AZURE_REGION', 'centralus')
+                azure_region = os.getenv('AZURE_REGION') or os.getenv('SPEECH_REGION', 'centralus')
             
             # Store Azure credentials as instance variables
             self.speech_key = azure_key
@@ -957,6 +970,7 @@ class VoiceInteraction(QObject):
             
             # Start continuous recognition
             self.speech_recognizer.start_continuous_recognition()
+            self.recognizer = self.speech_recognizer  # keep legacy ref in sync
             self.state.recognition_active = True
             self.state.status = "listening"
             self.logger.debug("Speech recognition started")
@@ -971,10 +985,14 @@ class VoiceInteraction(QObject):
         try:
             if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
                 recognized_text = evt.result.text
+                if not recognized_text or not recognized_text.strip():
+                    return
+                self.logger.debug(f"Recognized text: {recognized_text}")
                 self.logger.info(f"✅ Azure Speech recognized: '{recognized_text}'")
-                # Process the recognized text through command router
-                if hasattr(self, 'command_router') and self.command_router:
-                    self.command_router.route_command(recognized_text)
+                # Route through the FULL pipeline (preprocessing, vocab resolve, AI, etc.)
+                self.process_voice_command(recognized_text)
+            elif evt.result.reason == speechsdk.ResultReason.NoMatch:
+                self.logger.debug("Azure Speech: no speech could be recognized")
         except Exception as e:
             self.logger.error(f"Error in recognized callback: {e}")
 
@@ -2053,6 +2071,47 @@ class VoiceInteraction(QObject):
 
         return result
 
+    def vocabulary_resolve(self, text: str) -> str:
+        """
+        Pre-AI vocabulary correction: maps Azure's raw recognised text to
+        canonical product names using the VocabularyMap built from inventory.
+
+        e.g. "wood ford res double oak 0.3" -> "Woodford Reserve Double Oaked 0.3"
+
+        Ambiguous triggers are skipped — the AI handles those with full context.
+        Non-fatal: returns text unchanged on any error.
+        """
+        try:
+            dm = None
+            if self.state.dugal and hasattr(self.state.dugal, 'dictionary_manager'):
+                dm = self.state.dugal.dictionary_manager
+            if dm is None or not hasattr(dm, 'vocab_map'):
+                return text
+
+            vm = dm.vocab_map
+            if not vm.trigger_map:
+                return text
+
+            normalised = ' '.join(text.lower().split())
+
+            for trigger, canonical in vm.sorted_pairs():
+                if trigger not in normalised:
+                    continue
+                pattern = r'(?<!\w)' + re.escape(trigger) + r'(?!\w)'
+                if re.search(pattern, normalised):
+                    resolved = re.sub(pattern, canonical, normalised, flags=re.IGNORECASE)
+                    if resolved != normalised:
+                        logger.debug(
+                            f"vocabulary_resolve: '{text}' -> '{resolved}' "
+                            f"(trigger: '{trigger}' -> '{canonical}')"
+                        )
+                        return resolved
+            return text
+
+        except Exception as e:
+            logger.debug(f"vocabulary_resolve error (non-fatal): {e}")
+            return text
+
     def setup_document_vocabulary(self, workbook, search_column: str = "A"):
         """
         Extract vocabulary from Excel document and load into Azure Speech.
@@ -2269,6 +2328,10 @@ class VoiceInteraction(QObject):
 
             # Preprocess: convert spoken number words to digits (e.g. "zero point four" -> "0.4")
             command = self.preprocess_spoken_text(command)
+
+            # Vocabulary resolve: map recognised audio to canonical product names
+            # before the AI or command router ever see the text
+            command = self.vocabulary_resolve(command)
 
             # Normalize and correct potential spelling/pattern issues
             corrected_command = self.correct_spelling(command)
@@ -2501,7 +2564,19 @@ class VoiceInteraction(QObject):
             # Last item context (for "it", "that", etc.)
             if hasattr(self.state, 'active_item_context') and self.state.active_item_context:
                 context['last_item'] = self.state.active_item_context
-            
+
+            # Vocabulary map from dictionary manager — gives AI real product names
+            try:
+                dm = None
+                if self.state.dugal and hasattr(self.state.dugal, 'dictionary_manager'):
+                    dm = self.state.dugal.dictionary_manager
+                if dm and hasattr(dm, 'get_ai_context_payload'):
+                    vocab_payload = dm.get_ai_context_payload(max_items=200)
+                    if vocab_payload:
+                        context.update(vocab_payload)
+            except Exception as vocab_err:
+                logger.debug(f"Could not inject vocabulary payload: {vocab_err}")
+
         except Exception as e:
             logger.error(f"Error building AI context: {e}")
         

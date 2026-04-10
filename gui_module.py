@@ -850,6 +850,14 @@ class EnhancedDugalGUI(QMainWindow):
             if result.get('success'):
                 if self.voice_interaction:
                     self.voice_interaction.speak("Microphone test successful!")
+
+                    # Pass the confirmed mic device index to voice_interaction
+                    # so Azure uses the same device that passed the test.
+                    # result is an AudioResult object -- use .get() or getattr
+                    mic_index = getattr(result, 'device_index', None)
+                    if mic_index is not None:
+                        self.voice_interaction.current_mic_index = mic_index
+                        logger.debug(f"Mic device index {mic_index} passed to voice_interaction")
                     
                 # Hide the main GUI window
                 self.hide()

@@ -470,6 +470,7 @@ class ExcelHandler(QWidget):
     """Handles Excel file viewing operations."""
 
     refresh_complete = pyqtSignal()
+    cell_updated = pyqtSignal()   # fired after every Dugal write → instant refresh
 
     def __init__(self, dugal=None):
         super().__init__()
@@ -1094,8 +1095,13 @@ class ExcelHandler(QWidget):
         if self.state.dugal:
             self.state.dugal.speak("Updates paused.")
 
-    def refresh_view(self) -> bool:
-        """Refresh Excel view with latest data."""
+    def refresh_view(self, temp_path=None) -> bool:
+        """Refresh Excel view with latest data.
+
+        When *temp_path* is supplied (or discoverable via the SyncManager),
+        the view is loaded from the temp file so the user sees Dugal's
+        in-progress updates rather than the unmodified original.
+        """
         if not self.state.is_read_only:
             return False
             
@@ -1108,10 +1114,28 @@ class ExcelHandler(QWidget):
                 logger.debug("Skipping refresh - too soon since last refresh")
                 return True
 
-            # Load latest workbook
-            logger.debug("Loading latest workbook...")
+            # Prefer the temp file (Dugal's working copy) over the original
+            display_path = None
+            if temp_path:
+                display_path = str(temp_path)
+            elif (self.state.dugal and
+                  hasattr(self.state.dugal, 'voice_interaction') and
+                  hasattr(self.state.dugal.voice_interaction, 'sync_manager')):
+                sm = self.state.dugal.voice_interaction.sync_manager
+                if sm.is_open:
+                    try:
+                        tp = sm.update_handler.get_temp_path()
+                        if tp and tp.exists():
+                            display_path = str(tp)
+                    except Exception:
+                        pass
+
+            load_path = display_path or self.state.file_path
+
+            # Load latest workbook from the chosen path
+            logger.debug(f"Loading latest workbook from: {load_path}")
             self.state.workbook = load_workbook(
-                self.state.file_path,
+                load_path,
                 data_only=True,
                 read_only=True
             )

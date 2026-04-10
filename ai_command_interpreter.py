@@ -227,6 +227,43 @@ class AICommandInterpreter:
             if 'columns' in context and context['columns']:
                 cols_list = ', '.join(str(c) for c in context['columns'])
                 context_parts.append(f"- Available Columns: {cols_list}")
+
+            # Inventory vocabulary from dictionary manager
+            if 'inventory_sample' in context and context['inventory_sample']:
+                sample = context['inventory_sample']
+                # Show up to 80 items inline; mention total if more
+                shown = sample[:80]
+                context_parts.append(
+                    f"- Known Inventory Items ({context.get('vocab_size', len(sample))} total, "
+                    f"showing first {len(shown)}): "
+                    + ", ".join(shown)
+                )
+
+            if 'family_map' in context and context['family_map']:
+                family_lines = []
+                for brand, variants in list(context['family_map'].items())[:20]:
+                    family_lines.append(f"    {brand}: {', '.join(variants)}")
+                if family_lines:
+                    context_parts.append(
+                        "- Product Families (brand -> variants, say more words to disambiguate):\n"
+                        + "\n".join(family_lines)
+                    )
+
+            if 'ambiguous_triggers' in context and context['ambiguous_triggers']:
+                context_parts.append(
+                    "- Ambiguous short phrases (always ask for clarification if one of these is "
+                    "the only thing said): " + ", ".join(context['ambiguous_triggers'][:20])
+                )
+
+            if 'spoken_aliases' in context and context['spoken_aliases']:
+                alias_lines = [
+                    f"    '{k}' -> '{v}'"
+                    for k, v in list(context['spoken_aliases'].items())[:20]
+                ]
+                context_parts.append(
+                    "- Custom spoken aliases (highest priority matches):\n"
+                    + "\n".join(alias_lines)
+                )
             
             if context_parts:
                 context_str = "Current System State:\n" + '\n'.join(context_parts) + "\n"

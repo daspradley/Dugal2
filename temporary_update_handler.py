@@ -58,6 +58,10 @@ class TemporaryUpdateHandler:
         self.changes_made = False
         self.change_log = []
         self.last_save_time = None
+
+        # Callback fired after every successful cell write.
+        # Set this to excel_handler.cell_updated.emit after construction.
+        self._on_cell_updated = None
         
         # Initialize temp file
         self._create_temp_file()
@@ -200,6 +204,13 @@ class TemporaryUpdateHandler:
                 'change_amount': value
             }
             self.change_log.append(change_entry)
+
+            # Fire instant-refresh signal so the display updates immediately
+            try:
+                if self._on_cell_updated:
+                    self._on_cell_updated()
+            except Exception:
+                pass
             
             logger.info(f"✅ Updated {item_name}: {current_value} → {new_value} (operation: {operation})")
             
@@ -382,13 +393,23 @@ class TemporaryUpdateHandler:
     
     def close(self):
         """
-        Close the temp file and clean up.
-        Note: This does NOT save changes back to source!
-        Use SyncManager.save_to_source() for that.
+        Close the temp file and delete it from disk.
+        Note: This does NOT save changes back to source.
+        Use SyncManager.save_to_source() for that first.
         """
-        if self.workbook:
-            self.workbook.close()
-            logger.info("Temp file closed")
+        try:
+            if self.workbook:
+                self.workbook.close()
+                self.workbook = None
+        except Exception as e:
+            logger.debug(f"Workbook close error (non-fatal): {e}")
+
+        try:
+            if self.temp_path and self.temp_path.exists():
+                self.temp_path.unlink()
+                logger.info(f"Temp file deleted: {self.temp_path}")
+        except Exception as e:
+            logger.warning(f"Could not delete temp file {self.temp_path}: {e}")
     
     def __repr__(self):
         """String representation of TemporaryUpdateHandler."""

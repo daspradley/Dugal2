@@ -160,6 +160,9 @@ class SyncManager:
     def save_to_source(self, backup: bool = True) -> Dict[str, Any]:
         """
         Save temp file back to source (OneDrive, Google Sheets, etc.).
+
+        For Excel files, briefly locks the original file during the copy to
+        prevent race conditions, then immediately releases the lock.
         
         Args:
             backup: If True, create backup of source before overwriting
@@ -190,9 +193,24 @@ class SyncManager:
             
             # Save based on file type
             if self.file_type == "excel":
-                # Excel: Direct file copy
-                logger.info(f"Saving to Excel: {self.source_path}")
-                shutil.copy(temp_path, self.source_path)
+                # Briefly lock the original, copy temp → original, unlock immediately.
+                # The lock window is just the duration of the file copy (~ms).
+                onedrive_handler = self._get_onedrive_handler()
+                locked = False
+                if onedrive_handler:
+                    locked = onedrive_handler.lock_file()
+                    if not locked:
+                        logger.warning(
+                            "Could not lock original file for save — "
+                            "proceeding anyway (another user may be writing simultaneously)"
+                        )
+                try:
+                    logger.info(f"Saving to Excel: {self.source_path}")
+                    shutil.copy(temp_path, self.source_path)
+                finally:
+                    if onedrive_handler and locked:
+                        onedrive_handler.unlock_file()
+                        logger.debug("Original file unlocked after save")
                 
             elif self.file_type == "google_sheets":
                 # Google Sheets: Upload temp file
@@ -232,6 +250,14 @@ class SyncManager:
                 "message": error_msg
             }
     
+    def _get_onedrive_handler(self):
+        """Return the OneDriveHandler instance if available, else None."""
+        try:
+            from global_registry import GlobalRegistry
+            return GlobalRegistry.get('onedrive_handler')
+        except Exception:
+            return None
+
     def _create_backup(self) -> Path:
         """
         Create backup of source file.
