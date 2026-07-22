@@ -136,6 +136,8 @@ class EnhancedMicrophoneTest(QWidget):
         excel_handler: Optional[ExcelHandler] = None
     ) -> None:
         super().__init__()
+        VERSION = "2026-04-10_NO_STREAM_RESTART_v2"
+        logger.debug(f"🎤 MICROPHONE_TEST VERSION: {VERSION}")
         logger.debug("Initializing Enhanced Microphone Test")
         self.logger = logging.getLogger(__name__)
         self.voice_interaction = voice_interaction
@@ -729,8 +731,10 @@ class EnhancedMicrophoneTest(QWidget):
             self.components.dict_button.setEnabled(True)
             self.components.progress_bar.setValue(100)
             
-            # Resume level monitoring
-            if current_stream:
+            # Only resume level monitoring if the test was NOT successful.
+            # If it was successful the user will click Proceed shortly and
+            # we don't want PyAudio holding the device when Azure starts.
+            if current_stream and not self.test_successful:
                 try:
                     current_stream.start_stream()
                 except:
@@ -991,6 +995,11 @@ class EnhancedMicrophoneTest(QWidget):
                         "just skip the wee test instead of saying one little bity phrase. Fookin' Idiot."
                     )
 
+            # CRITICAL: Stop audio monitoring BEFORE emitting test_completed.
+            # Azure must be able to claim the microphone device when it starts.
+            # If PyAudio still holds the stream open, Azure gets silence.
+            self.stop_level_monitoring()
+
             # Now emit the test_completed signal with the saved audio result
             if hasattr(self, 'audio_result') and self.audio_result:
                 self.test_completed.emit(self.audio_result)
@@ -999,9 +1008,6 @@ class EnhancedMicrophoneTest(QWidget):
                 dummy_result = AudioResult(True, b'', 16000, 2)
                 dummy_result.recognized_text = "Test skipped"
                 self.test_completed.emit(dummy_result)
-
-            # Stop audio monitoring
-            self.stop_level_monitoring()
             
             # Important: make sure window is closed, not just hidden
             self.close()  # Close instead of hide

@@ -717,10 +717,6 @@ class ExcelHandler(QWidget):
                 logger.debug("Building initial search index")
                 self.build_search_index()
                 
-                # Open Excel and show control panel if in read-only mode
-                if read_only:
-                    self._open_excel_file(file_path)
-                
                 self._show_control_panel()
                 return True
             
@@ -975,7 +971,14 @@ class ExcelHandler(QWidget):
                 voice_result = self.state.dugal.voice_interaction.connect_to_file(self.state.file_path)
                 if voice_result and voice_result.get('success'):
                     logger.info(f"✅ Voice system connected to file via SyncManager")
-                    logger.info(f"   Temp file: {voice_result.get('temp_path')}")
+                    temp_path = voice_result.get('temp_path')
+                    logger.info(f"   Temp file: {temp_path}")
+                    # Open the SOURCE file in Excel for live viewing.
+                    # Dugal writes to the temp file via openpyxl, then pushes
+                    # each update into the running Excel instance via COM.
+                    # The source file stays unlocked for save-on-close.
+                    if self.state.file_path:
+                        self._open_excel_file(self.state.file_path)
                 else:
                     logger.warning(f"⚠️ Voice SyncManager connection failed: {voice_result.get('message') if voice_result else 'No result returned'}")
             except Exception as e:

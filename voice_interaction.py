@@ -676,7 +676,7 @@ class VoiceInteraction(QObject):
         super().__init__()
         
         # VERSION IDENTIFIER - Updated each deployment
-        VERSION = "2026-04-09_FULL_PIPELINE_v8"
+        VERSION = "2026-04-11_DEFERRED_PHRASES_v13"
         logger.debug(f"🔥 VOICE_INTERACTION VERSION: {VERSION}")
         logger.debug("Initializing voice interaction system...")
         self.logger = logging.getLogger(__name__)
@@ -685,24 +685,36 @@ class VoiceInteraction(QObject):
             # Initialize state
             self.state = VoiceState(dugal=dugal)
             
-            # Get Azure credentials — load .env first so os.getenv picks them up
+            # Load Azure credentials directly from .env file, bypassing os.getenv
+            # entirely to avoid any stale system environment variables.
+            _env_azure_key = None
+            _env_azure_region = None
             try:
-                from dotenv import load_dotenv
                 import pathlib
-                # Look for .env in the project directory
                 env_path = pathlib.Path(__file__).parent / ".env"
                 if env_path.exists():
-                    load_dotenv(env_path)
-                    logger.debug(f"Loaded .env from {env_path}")
+                    with open(env_path, 'r') as _f:
+                        for _line in _f:
+                            _line = _line.strip()
+                            if _line.startswith('#') or '=' not in _line:
+                                continue
+                            _k, _v = _line.split('=', 1)
+                            _k = _k.strip()
+                            _v = _v.strip().strip('"').strip("'")
+                            if _k in ('AZURE_SPEECH_KEY', 'SPEECH_KEY') and not _env_azure_key:
+                                _env_azure_key = _v
+                            elif _k in ('AZURE_REGION', 'SPEECH_REGION', 'AZURE_SPEECH_REGION') and not _env_azure_region:
+                                _env_azure_region = _v
+                    logger.debug(f"Read credentials directly from .env: {env_path}")
                 else:
-                    load_dotenv()  # search default locations
-            except ImportError:
-                pass  # python-dotenv not installed, rely on os.environ
+                    logger.warning(f".env file not found at {env_path}")
+            except Exception as _env_err:
+                logger.warning(f"Could not read .env directly: {_env_err}")
 
             if not azure_key:
-                azure_key = os.getenv('AZURE_SPEECH_KEY') or os.getenv('SPEECH_KEY', '')
+                azure_key = _env_azure_key or os.getenv('AZURE_SPEECH_KEY') or os.getenv('SPEECH_KEY', '')
             if not azure_region:
-                azure_region = os.getenv('AZURE_REGION') or os.getenv('SPEECH_REGION', 'centralus')
+                azure_region = _env_azure_region or os.getenv('AZURE_REGION') or os.getenv('SPEECH_REGION', 'centralus')
             
             # Store Azure credentials as instance variables
             self.speech_key = azure_key
@@ -900,6 +912,12 @@ class VoiceInteraction(QObject):
     def configure_speech_recognizer(self, timeout_ms=300000, end_silence_ms=2000):
         """Configure the speech recognizer with VERY extended timeout parameters for always-listening mode."""
         try:
+            # Verify key is present before attempting to create recognizer
+            if not self.speech_key:
+                self.logger.error("Azure speech key is empty — cannot configure recognizer")
+                return False
+            self.logger.debug(f"Configuring recognizer with key (first 10): {self.speech_key[:10]}... region: {self.speech_region}")
+
             # Create a speech configuration with your Azure subscription key and region
             speech_config = speechsdk.SpeechConfig(
                 subscription=self.speech_key, 
@@ -947,18 +965,11 @@ class VoiceInteraction(QObject):
             # Configure the recognizer with VERY extended timeouts
             # 300000ms (5 minutes) initial timeout - essentially always listening
             # 2000ms (2 seconds) end silence timeout - wait 2 seconds after you stop talking
-            self.configure_speech_recognizer(timeout_ms=300000, end_silence_ms=2000)
+            self.configure_speech_recognizer(timeout_ms=300000, end_silence_ms=4000)
             
-            # CRITICAL: Load cached phrases into the newly created recognizer
-            if hasattr(self, 'phrase_manager') and self.phrase_manager.get_phrase_count() > 0:
-                self.logger.info("Loading cached phrases into Azure Speech recognizer")
-                try:
-                    loaded = self.phrase_manager.load_phrases_into_azure(self.speech_recognizer)
-                    self.logger.info(f"✅ Loaded {loaded} phrases into Azure Speech for improved recognition")
-                except Exception as e:
-                    self.logger.error(f"Error loading phrases into recognizer: {e}")
-            else:
-                self.logger.debug("No cached phrases to load (phrase manager not initialized or empty)")
+            # Phrases are now loaded in _session_started_callback (post-session)
+            # to avoid PhraseListGrammar GC issues. Nothing to do here.
+            self.logger.info("Phrases will be loaded after session starts")
             
             # Connect callbacks to handle recognized speech
             self.speech_recognizer.recognized.connect(self._recognized_callback)
@@ -968,8 +979,11 @@ class VoiceInteraction(QObject):
             self.speech_recognizer.canceled.connect(self._canceled_callback)
             self.logger.debug("Azure Speech event callbacks connected")
             
-            # Start continuous recognition
-            self.speech_recognizer.start_continuous_recognition()
+            # Start continuous recognition asynchronously so Qt's event loop
+            # is not blocked during the SDK's session startup handshake.
+            # The synchronous version can stall the GIL and starve the Azure
+            # audio callback thread under Qt.
+            self.speech_recognizer.start_continuous_recognition_async()
             self.recognizer = self.speech_recognizer  # keep legacy ref in sync
             self.state.recognition_active = True
             self.state.status = "listening"
@@ -1000,25 +1014,77 @@ class VoiceInteraction(QObject):
         """Handle partial recognition results (real-time transcription)."""
         try:
             if evt.result.reason == speechsdk.ResultReason.RecognizingSpeech:
-                self.logger.debug(f"Recognizing: '{evt.result.text}'")
+                self.logger.info(f"🎤 Recognizing: '{evt.result.text}'")
         except Exception as e:
             self.logger.error(f"Error in recognizing callback: {e}")
 
     def _session_started_callback(self, evt):
-        """Handle session start."""
+        """Handle session start — schedule phrase loading on a background thread."""
         self.logger.info("🎤 Azure Speech session started")
+        # Only load phrases on the FIRST session start.
+        # When we stop/restart the recognizer around speech synthesis,
+        # the phrases are already attached to the grammar object — no need to reload.
+        if getattr(self, '_phrases_loaded', False):
+            return
+        self._phrases_loaded = True
+        # Schedule phrase loading on a new thread so we don't block Azure's
+        # internal session_started callback thread. A small delay ensures the
+        # recognizer is fully ready before we attach the grammar.
+        import threading
+        def _load_phrases_deferred():
+            import time
+            time.sleep(1.0)  # wait for recognizer to fully initialize before loading grammar
+            if hasattr(self, 'phrase_manager') and self.phrase_manager.get_phrase_count() > 0:
+                try:
+                    loaded = self.phrase_manager.load_phrases_into_azure(self.speech_recognizer)
+                    self.logger.info(f"✅ Loaded {loaded} phrases into Azure Speech (deferred)")
+                    # Brief pause then restart to ensure Azure picks up the new grammar cleanly.
+                    # Set _intentional_stop so the watchdog doesn't fire during this cycle.
+                    time.sleep(0.3)
+                    if getattr(self.state, 'recognition_active', False) and                        hasattr(self, 'speech_recognizer') and self.speech_recognizer:
+                        self._intentional_stop = True
+                        self.speech_recognizer.stop_continuous_recognition_async().get()
+                        self.speech_recognizer.start_continuous_recognition_async()
+                        self.logger.info("🎤 Recognizer cycled after phrase load to pick up new grammar")
+                        time.sleep(0.5)
+                        self._intentional_stop = False
+                except Exception as e:
+                    self._intentional_stop = False
+                    self.logger.error(f"Error loading phrases deferred: {e}")
+        threading.Thread(target=_load_phrases_deferred, daemon=True).start()
 
     def _session_stopped_callback(self, evt):
-        """Handle session stop."""
+        """Handle session stop — restart if we're supposed to be listening."""
         self.logger.info("🎤 Azure Speech session stopped")
+        # Only auto-restart if this was NOT an intentional stop (e.g. from speak()).
+        # _intentional_stop is set True by speak() before stopping and False after restarting.
+        if getattr(self, '_intentional_stop', False):
+            return  # speak() is managing this cycle — don't interfere
+        if getattr(self.state, 'recognition_active', False):
+            import threading, time
+            def _restart():
+                time.sleep(0.3)
+                try:
+                    if getattr(self.state, 'recognition_active', False) and \
+                       hasattr(self, 'speech_recognizer') and self.speech_recognizer:
+                        self.speech_recognizer.start_continuous_recognition_async()
+                        self.logger.info("🎤 Azure Speech auto-restarted after unexpected stop")
+                except Exception as e:
+                    self.logger.error(f"Auto-restart failed: {e}")
+            threading.Thread(target=_restart, daemon=True).start()
 
     def _canceled_callback(self, evt):
         """Handle recognition cancellation."""
         try:
-            if evt.reason == speechsdk.CancellationReason.Error:
-                self.logger.error(f"Azure Speech recognition canceled due to error: {evt.error_details}")
+            reason = getattr(evt, 'reason', None)
+            if reason == speechsdk.CancellationReason.Error:
+                error_code = getattr(evt, 'error_code', 'unknown')
+                error_details = getattr(evt, 'error_details', 'unknown')
+                self.logger.error(f"🔴 AZURE CANCELED — error code: {error_code}, details: {error_details}")
+            elif reason is not None:
+                self.logger.warning(f"🟡 Azure Speech recognition canceled: {reason}")
             else:
-                self.logger.warning(f"Azure Speech recognition canceled: {evt.reason}")
+                self.logger.warning("🟡 Azure Speech recognition canceled (no reason provided)")
         except Exception as e:
             self.logger.error(f"Error in canceled callback: {e}")
 
@@ -3204,6 +3270,17 @@ class VoiceInteraction(QObject):
             if priority:
                 self._configure_priority_speech()
             
+            # Pause recognition while speaking so Azure doesn't hear our own
+            # voice through the mic and get confused about the silence window.
+            was_active = getattr(self.state, 'recognition_active', False)
+            if was_active and hasattr(self, 'speech_recognizer') and self.speech_recognizer:
+                try:
+                    self._intentional_stop = True   # tell _session_stopped_callback to stand down
+                    self.state.recognition_active = False
+                    self.speech_recognizer.stop_continuous_recognition_async().get()
+                except Exception:
+                    pass
+
             # Synthesize and speak
             result = self.state.synthesizer.speak_text_async(text).get()
             
@@ -3217,6 +3294,21 @@ class VoiceInteraction(QObject):
                     if cancellation_details.reason == speechsdk.CancellationReason.Error:
                         logger.error(f"Speech synthesis error: {cancellation_details.error_details}")
             
+            # Resume recognition after speaking
+            if was_active and hasattr(self, 'speech_recognizer') and self.speech_recognizer:
+                try:
+                    self.state.recognition_active = True
+                    self.speech_recognizer.start_continuous_recognition_async()
+                    # Clear _intentional_stop after a delay longer than the watchdog's 300ms sleep,
+                    # so the watchdog can't fire during our intentional stop/restart window.
+                    import threading, time
+                    def _clear_flag():
+                        time.sleep(0.5)
+                        self._intentional_stop = False
+                    threading.Thread(target=_clear_flag, daemon=True).start()
+                except Exception:
+                    self._intentional_stop = False
+
             return success
             
         except Exception as e:
@@ -3987,29 +4079,13 @@ class VoiceInteraction(QObject):
                 else:
                     return ""  # Unknown value - stay silent
             
-            # ORIGINAL UPDATE LOGIC
-            updates = result.get("updates", [])
-            if not updates:
-                return "Update successful, but details are unclear."
-
-            update = updates[0]
-            item = update.get("item", "something")
-            new_value = update.get("new_value", 0)
-            sheet_count = len(updates)
-
-            # Template-based response generation
-            responses = [
-                f"Updated {item} to {new_value} across {sheet_count} sheets.",
-                f"Inventory for {item} now set to {new_value}.",
-                f"Successfully updated {item}: new value is {new_value}.",
-                f"Tracking {item} updated to {new_value} in {sheet_count} locations."
-            ]
-
-            return random.choice(responses)
+            # INVENTORY UPDATE — silent (bell only, no speech)
+            # Spoken confirmations slow down rapid-fire inventory sessions.
+            return ""
 
         except Exception as e:
             logger.error(f"Success response formatting error: {e}")
-            return "Update processed successfully."
+            return ""
 
     def _format_error_response(self, result: Dict[str, Any]) -> str:
         """Format an error response with contextual information."""

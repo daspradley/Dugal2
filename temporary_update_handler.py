@@ -186,10 +186,33 @@ class TemporaryUpdateHandler:
             # Update cell
             sheet.cell(row=row, column=column, value=new_value)
             
-            # Save workbook
+            # Save workbook to temp file (durable record)
             self.workbook.save(self.temp_path)
             self.last_save_time = datetime.now()
-            
+
+            # Push the same value live into the running Excel instance via COM.
+            # Best-effort: if it fails the temp write above already succeeded.
+            try:
+                import win32com.client
+                xl = win32com.client.GetActiveObject("Excel.Application")
+                source_name = Path(self.source_path).name
+                wb = None
+                for w in xl.Workbooks:
+                    if w.Name == source_name:
+                        wb = w
+                        break
+                if wb is not None:
+                    ws = None
+                    for s in wb.Sheets:
+                        if s.Name.strip() == sheet_name.strip():
+                            ws = s
+                            break
+                    if ws is not None:
+                        ws.Cells(row, column).Value = new_value
+                        logger.debug(f"COM live update: {sheet_name}[{row},{column}] = {new_value}")
+            except Exception as com_err:
+                logger.debug(f"COM live update skipped: {com_err}")
+
             # Track change
             self.changes_made = True
             change_entry = {

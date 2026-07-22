@@ -579,60 +579,44 @@ class AdaptiveInventorySearchEngine:
         return None
 
     def _search_with_variations(self, search_term: str, threshold: float) -> List[Dict]:
-        """Search using all possible variations of the term with enhanced matching."""
+        """Search using difflib against canonical names only — fast O(n) scan."""
+        from difflib import get_close_matches, SequenceMatcher
         matches = []
         seen_items = set()
-        
-        # Log the search attempt
+
         self.logger.debug(f"Fuzzy searching for '{search_term}' with threshold {threshold}")
-        
-        # Get variations from learned patterns
-        search_variations = {search_term}
-        tokens = self._tokenize_and_process(search_term)
-        
-        # Add known variations
-        for token in tokens:
-            if token in self.learned_patterns:
-                search_variations.update(self.learned_patterns[token])
-        
-        # Add partial search variations - focus on first words
-        search_tokens = search_term.split()
-        if len(search_tokens) > 1:
-            search_variations.add(search_tokens[0])  # First word only
-            if len(search_tokens) > 2:
-                search_variations.add(f"{search_tokens[0]} {search_tokens[1]}")  # First two words
-        
-        # Search using all variations
-        for variation in search_variations:
-            self.logger.debug(f"Trying variation: '{variation}'")
-            
-            for cached_item, entries in self.inventory_cache.items():
-                for entry in entries:
-                    if entry['original'] in seen_items:
-                        continue
-                        
-                    similarity = self._calculate_enhanced_similarity(
-                        variation,
-                        cached_item,
-                        entry['tokens'] if 'tokens' in entry else None
-                    )
-                    
-                    if similarity >= threshold:
-                        matches.append({
-                            'item': entry['original'],
-                            'sheet': entry['sheet'],
-                            'row': entry['row'],
-                            'confidence': similarity,
-                            'matched_term': variation
-                        })
-                        seen_items.add(entry['original'])
-        
-        # Sort by confidence
+
+        # Build a map of lowercase canonical name -> first cache entry.
+        # Scan canonical names only (~1700), not all 47k phonetic variants.
+        canonical_map = {}
+        for cached_key, entries in self.inventory_cache.items():
+            for entry in entries:
+                orig_lower = entry['original'].lower()
+                if orig_lower not in canonical_map:
+                    canonical_map[orig_lower] = entry
+
+        # Fast close-match pass with difflib
+        close = get_close_matches(search_term, canonical_map.keys(), n=5, cutoff=threshold)
+        for match_key in close:
+            entry = canonical_map[match_key]
+            if entry['original'] in seen_items:
+                continue
+            score = SequenceMatcher(None, search_term, match_key).ratio()
+            col = self.input_column_map.get(entry['sheet']) if hasattr(self, 'input_column_map') else None
+            matches.append({
+                'item': entry['original'],
+                'sheet': entry['sheet'],
+                'row': entry['row'],
+                'column': col,
+                'confidence': score,
+                'matched_term': match_key
+            })
+            seen_items.add(entry['original'])
+
         matches.sort(key=lambda x: x['confidence'], reverse=True)
-        
-        # Log match results
+
         if matches:
-            self.logger.debug(f"Found {len(matches)} fuzzy matches. Best match: '{matches[0]['item']}' with score {matches[0]['confidence']:.2f} from '{matches[0]['matched_term']}'")
+            self.logger.debug(f"Found {len(matches)} fuzzy matches. Best: '{matches[0]['item']}' ({matches[0]['confidence']:.2f})")
         else:
             self.logger.debug(f"No fuzzy matches found for '{search_term}'")
         
@@ -729,11 +713,14 @@ class AdaptiveInventorySearchEngine:
                 entries = self.inventory_cache[search_term]
                 if entries:
                     first_entry = entries[0]
+                    sheet = first_entry['sheet']
+                    col = self.input_column_map.get(sheet) if hasattr(self, 'input_column_map') else None
                     result = {
                         'found': True,
                         'item': first_entry['original'],
-                        'sheet': first_entry['sheet'],
+                        'sheet': sheet,
                         'row': first_entry['row'],
+                        'column': col,
                         'value': self._get_value_for_item(first_entry)
                     }
                     self.logger.debug(f"Direct match found: {result}")
@@ -746,11 +733,14 @@ class AdaptiveInventorySearchEngine:
             similar_items = self._search_with_variations(search_term, 0.60)
             if similar_items and len(similar_items) > 0:
                 best_match = similar_items[0]
+                sheet = best_match['sheet']
+                col = self.input_column_map.get(sheet) if hasattr(self, 'input_column_map') else None
                 result = {
                     'found': True,
                     'item': best_match['item'],
-                    'sheet': best_match['sheet'],
+                    'sheet': sheet,
                     'row': best_match['row'],
+                    'column': col,
                     'value': self._get_value_for_item(best_match),
                     'was_similar': True
                 }

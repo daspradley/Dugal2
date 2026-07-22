@@ -159,6 +159,39 @@ class CommandRouter:
                 error="Empty command text"
             )
             
+        # ── FAST PATH: [item name] [decimal/integer] ──────────────────────────
+        # Bypass the 2-4s AI round-trip for the most common inventory pattern.
+        # Matches things like "aperol .2", "buffalo trace 1", "bowman brothers 2"
+        # Strip trailing punctuation before matching
+        _stripped = command_text.strip().rstrip('.')
+        _fast_match = re.match(
+            r'^(.+?)\s+(\d*\.?\d+)$', _stripped, re.IGNORECASE
+        )
+        if _fast_match and hasattr(self, 'inventory_handler') and self.inventory_handler:
+            _item = _fast_match.group(1).strip(' ,')
+            _qty  = float(_fast_match.group(2))
+            # Only bypass AI if the item part has no ambiguous operation keywords
+            _no_op_keywords = not re.search(
+                r'(add|plus|subtract|minus|remove|set|to|for|find|search|lookup)',
+                _item, re.IGNORECASE
+            )
+            if _no_op_keywords and _qty >= 0:
+                logger.debug(f"Fast path: '{_item}' = {_qty}")
+                fast_match = CommandMatch(
+                    handler=self.inventory_handler,
+                    command_text=_item,
+                    pattern="fast_inventory_update",
+                    named_groups={
+                        'item_name': _item,
+                        'quantity': _qty,
+                        'operation': 'set'
+                    },
+                    confidence=0.85,
+                    metadata={'fast_path': True, 'intent': 'inventory_update', 'operation': 'set'}
+                )
+                return RouterResult(success=True, command_match=fast_match)
+            # If keywords present, fall through to AI
+
         if self.use_ai and self.ai_interpreter:
             try:
                 logger.debug(f"Attempting AI interpretation for: '{command_text}'")

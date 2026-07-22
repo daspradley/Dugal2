@@ -370,20 +370,33 @@ INTERPRETATION GUIDELINES:
    
    CRITICAL: NUMBERS IN PRODUCT NAMES VS INVENTORY COUNTS
    
-   Numbers 1-25 are AMBIGUOUS - could be age statements OR small inventory counts:
-   - "knob creek 12" → AMBIGUOUS (12 Year vs 12 bottles)
-   - "glenlivet 18" → AMBIGUOUS (18 Year vs 18 bottles)
-   - "buffalo trace 15" → AMBIGUOUS (15 bottles is realistic)
+   FIRST: Check the Product Families list in the context above.
+   - If "[Item] [Number]" appears as an actual variant in the family_map → could be a product name, be cautious
+   - If "[Item] [Number]" does NOT appear in the family_map → number is almost certainly a quantity, treat as UPDATE
    
-   When ambiguous (number 1-25 with NO explicit operation word):
+   Example: If family_map shows "Knob Creek: [Knob Creek, Knob Creek 12, Knob Creek Smoked Maple]"
+   then "knob creek 12" is AMBIGUOUS (it's a real product variant).
+   But if "Bower Hill" only appears as "Bower Hill" with no numbered variants,
+   then "bower hill 1" → inventory_update (confidence 0.85, number is quantity not variant).
+   
+   Numbers 1-25 are AMBIGUOUS only if "[Item] [Number]" exists as a known product variant:
+   - "knob creek 12" → AMBIGUOUS (12 Year variant exists in family_map)
+   - "glenlivet 18" → AMBIGUOUS (18 Year variant exists in family_map)
+   - "bower hill 1" → inventory_update (no "Bower Hill 1" in family_map, 1 = quantity)
+   - "buffalo trace 1" → inventory_update (no "Buffalo Trace 1" in family_map, 1 = quantity)
+   
+   When item has NO numbered variants in family_map (number 1-99):
+   - Treat number as inventory quantity, intent = inventory_update
+   - Confidence: 0.85
+   
+   When item HAS numbered variants in family_map (number 1-25):
    - Mark as "unclear" intent
    - Confidence: 0.3-0.5
    - Suggested clarification: "Did you mean to search for '[Item] [Number]' or update [Item] quantity by [Number]?"
    
-   Numbers 26-99 are MORE LIKELY inventory counts but STILL CHECK:
-   - "makers mark 46" → LIKELY UPDATE (46 bottles reasonable)
-   - "woodford reserve 90" → LIKELY UPDATE (90 bottles reasonable)
-   - BUT "old forester 86" could be "Old Forester 86 Proof"
+   Numbers 26-99 with numbered variants still MORE LIKELY inventory counts:
+   - "makers mark 46" → LIKELY UPDATE (confidence 0.7)
+   - BUT "old forester 86" could be "Old Forester 86 Proof" — check family_map
    
    Numbers 100+ are ALMOST ALWAYS inventory counts:
    - "titos 150" → UPDATE (150 bottles)
@@ -434,11 +447,13 @@ INTERPRETATION GUIDELINES:
    - Example: "breaker wheat 1.1" → inventory_update (confidence 0.9)
    - Example: "makers mark 0.6" → inventory_update (confidence 0.9)
    
-   Step 4: Check number range (for integers only)
+   Step 4: Check number range against family_map (for integers only)
    - If number ≥ 1000 → SEARCH (likely product name/year)
-   - If number 100-999 → LIKELY UPDATE (mark confidence 0.7, could clarify)
-   - If number 26-99 → AMBIGUOUS (confidence 0.4, ASK FOR CLARIFICATION)
-   - If number 1-25 → VERY AMBIGUOUS (confidence 0.3, ASK FOR CLARIFICATION)
+   - If number 100-999 → LIKELY UPDATE (confidence 0.85)
+   - If number 26-99 AND "[Item] [Number]" is a known variant → AMBIGUOUS (confidence 0.4)
+   - If number 26-99 AND "[Item] [Number]" NOT in family_map → UPDATE (confidence 0.8)
+   - If number 1-25 AND "[Item] [Number]" is a known variant → VERY AMBIGUOUS (confidence 0.3, ASK)
+   - If number 1-25 AND "[Item] [Number]" NOT in family_map → UPDATE (confidence 0.85)
    
    Examples:
    - "makers mark 3" → unclear (confidence 0.3, integer in ambiguous range)

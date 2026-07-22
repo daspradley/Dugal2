@@ -180,8 +180,10 @@ class PhraseListManager:
         logger.info(f"Loading phrases into Azure Speech recognizer")
         
         try:
-            # Create phrase list grammar
-            phrase_list_grammar = speechsdk.PhraseListGrammar.from_recognizer(recognizer)
+            # Create phrase list grammar — MUST be stored as instance variable.
+            # If this goes out of scope and gets garbage collected, Azure silently
+            # stops processing audio even though the session appears active.
+            self._phrase_list_grammar = speechsdk.PhraseListGrammar.from_recognizer(recognizer)
             
             # Flatten all variations
             all_phrases = []
@@ -193,7 +195,7 @@ class PhraseListManager:
             
             # Add phrases to Azure
             for phrase in unique_phrases:
-                phrase_list_grammar.addPhrase(phrase)
+                self._phrase_list_grammar.addPhrase(phrase)
             
             logger.info(f"✅ Loaded {len(unique_phrases)} phrases into Azure Speech")
             return len(unique_phrases)
